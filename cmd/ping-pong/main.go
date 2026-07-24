@@ -41,6 +41,13 @@ var (
 	downPressed bool
 )
 
+// タッチ移動用（相対移動）の変数
+var (
+	touchStartY  float64
+	paddleStartY float64
+	isTouching   bool
+)
+
 // 通信メッセージ構造体（スコア情報を追加）
 type Message struct {
 	Type       string  `json:"type"`
@@ -107,36 +114,58 @@ func setupInputHandlers() {
 		return nil
 	}))
 
-	// タッチ操作（画面全体どこを触っても反応するように拡張）
-	handleTouch := js.FuncOf(func(this js.Value, args []js.Value) any {
+	// --- スマホ用（相対移動タッチ操作） ---
+
+	// タッチ開始時：指のY位置と現在のパドル位置を記憶（パドルは跳ばない）
+	handleTouchStart := js.FuncOf(func(this js.Value, args []js.Value) any {
 		e := args[0]
-		e.Call("preventDefault") // スマホのページスクロールを防止
+		e.Call("preventDefault")
 
 		touches := e.Get("touches")
 		if touches.Get("length").Int() > 0 {
 			touch := touches.Index(0)
+			touchStartY = touch.Get("clientY").Float()
+			paddleStartY = myPaddleY
+			isTouching = true
+		}
+		return nil
+	})
+
+	// タッチ移動時：触れた場所からの「移動差分」だけパドルを動かす
+	handleTouchMove := js.FuncOf(func(this js.Value, args []js.Value) any {
+		e := args[0]
+		e.Call("preventDefault")
+
+		touches := e.Get("touches")
+		if touches.Get("length").Int() > 0 && isTouching {
+			touch := touches.Index(0)
+			currentY := touch.Get("clientY").Float()
+
 			rect := canvas.Call("getBoundingClientRect")
-
-			clientY := touch.Get("clientY").Float()
-			rectTop := rect.Get("top").Float()
 			rectHeight := rect.Get("height").Float()
-
-			// 表示サイズと解像度（400px）のスケール比率を補正
 			scaleY := canvasHeight / rectHeight
-			canvasTouchY := (clientY - rectTop) * scaleY
 
-			// 指のY位置に合わせてパドルを動かす
-			myPaddleY = canvasTouchY - (paddleHeight / 2)
+			// 指の移動差分（ピクセル）
+			deltaY := (currentY - touchStartY) * scaleY
 
-			// 画面外を触っても、パドルが画面端でピタッと止まるように丸める
+			// 触り始めた時点のパドル位置 ＋ 移動量
+			myPaddleY = paddleStartY + deltaY
 			clampPaddle()
 		}
 		return nil
 	})
 
-	// 💡 監視先を canvas から doc（画面全体）に変更
-	doc.Call("addEventListener", "touchstart", handleTouch, map[string]any{"passive": false})
-	doc.Call("addEventListener", "touchmove", handleTouch, map[string]any{"passive": false})
+	// タッチ終了時
+	handleTouchEnd := js.FuncOf(func(this js.Value, args []js.Value) any {
+		isTouching = false
+		return nil
+	})
+
+	// イベントリスナーを画面全体 (doc) に登録
+	doc.Call("addEventListener", "touchstart", handleTouchStart, map[string]any{"passive": false})
+	doc.Call("addEventListener", "touchmove", handleTouchMove, map[string]any{"passive": false})
+	doc.Call("addEventListener", "touchend", handleTouchEnd, map[string]any{"passive": false})
+	doc.Call("addEventListener", "touchcancel", handleTouchEnd, map[string]any{"passive": false})
 }
 
 func clampPaddle() {
