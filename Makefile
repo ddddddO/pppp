@@ -4,5 +4,8 @@ wasm:
 serve:
 	cd docs && python3 -m http.server 8080
 
+build:
+	go build -o server cmd/signaling-server/main.go
+
 cpwasmexec:
 	cp /usr/local/go/lib/wasm/wasm_exec.js docs/

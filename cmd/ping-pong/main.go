@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	wsURL = "wss://xxxxx/ws"
+	wsURL = "wss://pppp-9hxy.onrender.com/ws"
 
 	screenWidth  = 640
 	screenHeight = 480
