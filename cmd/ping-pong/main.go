@@ -114,56 +114,43 @@ func setupInputHandlers() {
 		return nil
 	}))
 
-	// --- スマホ用（相対移動タッチ操作） ---
+	// --- スマホ用（バーチャルボタン方式：座標計算なし） ---
 
-	// タッチ開始時：指のY位置と現在のパドル位置を記憶（パドルは跳ばない）
-	handleTouchStart := js.FuncOf(func(this js.Value, args []js.Value) any {
+	// タッチ時 / タッチ移動時
+	handleTouch := js.FuncOf(func(this js.Value, args []js.Value) any {
 		e := args[0]
-		e.Call("preventDefault")
+		e.Call("preventDefault") // スクロール防止
 
 		touches := e.Get("touches")
 		if touches.Get("length").Int() > 0 {
 			touch := touches.Index(0)
-			touchStartY = touch.Get("clientY").Float()
-			paddleStartY = myPaddleY
-			isTouching = true
+			clientY := touch.Get("clientY").Float()
+
+			// 画面全体の高さ（ブラウザの表示域）
+			windowHeight := js.Global().Get("innerHeight").Float()
+
+			// 画面の上半分か下半分かで判断
+			if clientY < windowHeight/2 {
+				upPressed = true
+				downPressed = false
+			} else {
+				upPressed = false
+				downPressed = true
+			}
 		}
 		return nil
 	})
 
-	// タッチ移動時：触れた場所からの「移動差分」だけパドルを動かす
-	handleTouchMove := js.FuncOf(func(this js.Value, args []js.Value) any {
-		e := args[0]
-		e.Call("preventDefault")
-
-		touches := e.Get("touches")
-		if touches.Get("length").Int() > 0 && isTouching {
-			touch := touches.Index(0)
-			currentY := touch.Get("clientY").Float()
-
-			rect := canvas.Call("getBoundingClientRect")
-			rectHeight := rect.Get("height").Float()
-			scaleY := canvasHeight / rectHeight
-
-			// 指の移動差分（ピクセル）
-			deltaY := (currentY - touchStartY) * scaleY
-
-			// 触り始めた時点のパドル位置 ＋ 移動量
-			myPaddleY = paddleStartY + deltaY
-			clampPaddle()
-		}
-		return nil
-	})
-
-	// タッチ終了時
+	// 指を離した時 ➡️ 移動停止
 	handleTouchEnd := js.FuncOf(func(this js.Value, args []js.Value) any {
-		isTouching = false
+		upPressed = false
+		downPressed = false
 		return nil
 	})
 
-	// イベントリスナーを画面全体 (doc) に登録
-	doc.Call("addEventListener", "touchstart", handleTouchStart, map[string]any{"passive": false})
-	doc.Call("addEventListener", "touchmove", handleTouchMove, map[string]any{"passive": false})
+	// 画面全体（doc）に登録
+	doc.Call("addEventListener", "touchstart", handleTouch, map[string]any{"passive": false})
+	doc.Call("addEventListener", "touchmove", handleTouch, map[string]any{"passive": false})
 	doc.Call("addEventListener", "touchend", handleTouchEnd, map[string]any{"passive": false})
 	doc.Call("addEventListener", "touchcancel", handleTouchEnd, map[string]any{"passive": false})
 }
