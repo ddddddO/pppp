@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"syscall/js"
+	"time"
 )
 
 const (
@@ -21,7 +22,7 @@ var (
 	ctx         js.Value
 	ws          js.Value
 	pc          js.Value // RTCPeerConnection
-	dataChannel js.Value // RTCDataChannel (P2P通信用)
+	dataChannel js.Value // RTCDataChannel
 
 	role        string
 	p2pReady    bool
@@ -40,6 +41,7 @@ var (
 	downPressed bool
 )
 
+// P2P通信用データ構造体（Goネイティブ構造体なので json.Marshal OK）
 type Message struct {
 	Y          float64 `json:"y"`
 	BX         float64 `json:"bx"`
@@ -49,6 +51,7 @@ type Message struct {
 }
 
 func main() {
+	rand.Seed(time.Now().UnixNano())
 	c := make(chan struct{})
 
 	doc = js.Global().Get("document")
@@ -57,11 +60,11 @@ func main() {
 
 	setupInputHandlers()
 
-	// WebSocketシグナリングサーバー接続
+	// 1. シグナリング接続
 	wsURL := "wss://pppp-9hxy.onrender.com/ws"
 	setupSignaling(wsURL)
 
-	// メインループ
+	// 2. ゲームループ
 	var renderFrame js.Func
 	renderFrame = js.FuncOf(func(this js.Value, args []js.Value) any {
 		update()
@@ -76,47 +79,58 @@ func main() {
 }
 
 // --------------------------------------------------
-// WebRTC & シグナリング処理
+// WebRTC & シグナリング処理 (修正版)
 // --------------------------------------------------
+
+// JSオブジェクトを安全にJSON文字列化して送信するヘルパー関数
+func sendJSSignal(msgType string, key string, val js.Value) {
+	obj := js.Global().Get("Object").New()
+	obj.Set("type", msgType)
+	obj.Set(key, val)
+	jsonStr := js.Global().Get("JSON").Call("stringify", obj).String()
+	ws.Call("send", jsonStr)
+}
+
 func setupSignaling(url string) {
 	ws = js.Global().Get("WebSocket").New(url)
 
 	ws.Set("onmessage", js.FuncOf(func(this js.Value, args []js.Value) any {
 		dataStr := args[0].Get("data").String()
 
-		var msg map[string]any
-		json.Unmarshal([]byte(dataStr), &msg)
-
-		msgType, _ := msg["type"].(string)
+		// JSのJSON.parseでパースしてJavaScriptオブジェクトを保持
+		msgObj := js.Global().Get("JSON").Call("parse", dataStr)
+		msgType := msgObj.Get("type").String()
 
 		switch msgType {
 		case "paired":
-			role, _ = msg["role"].(string)
+			role = msgObj.Get("role").String()
 			fmt.Println("Role assigned:", role)
 			initWebRTC()
 
 		case "offer":
 			if role == "joiner" {
-				offer := js.Global().Get("JSON").Call("parse", dataStr).Get("sdp")
+				offer := msgObj.Get("sdp")
 				handleOffer(offer)
 			}
 
 		case "answer":
 			if role == "host" {
-				answer := js.Global().Get("JSON").Call("parse", dataStr).Get("sdp")
+				answer := msgObj.Get("sdp")
 				pc.Call("setRemoteDescription", answer)
 			}
 
 		case "candidate":
-			candidate := js.Global().Get("JSON").Call("parse", dataStr).Get("candidate")
-			pc.Call("addIceCandidate", candidate)
+			cand := msgObj.Get("candidate")
+			if !cand.IsNull() && !cand.IsUndefined() {
+				rtcCand := js.Global().Get("RTCIceCandidate").New(cand)
+				pc.Call("addIceCandidate", rtcCand)
+			}
 		}
 		return nil
 	}))
 }
 
 func initWebRTC() {
-	// STUN サーバー設定
 	config := map[string]any{
 		"iceServers": []any{
 			map[string]any{"urls": "stun:stun.l.google.com:19302"},
@@ -124,37 +138,31 @@ func initWebRTC() {
 	}
 	pc = js.Global().Get("RTCPeerConnection").New(js.ValueOf(config))
 
-	// ICE Candidate 発生時の処理
+	// ICE Candidate 発生時
 	pc.Set("onicecandidate", js.FuncOf(func(this js.Value, args []js.Value) any {
 		evt := args[0]
 		candidate := evt.Get("candidate")
 		if !candidate.IsNull() && !candidate.IsUndefined() {
-			sendSignal(map[string]any{
-				"type":      "candidate",
-				"candidate": candidate,
-			})
+			sendJSSignal("candidate", "candidate", candidate)
 		}
 		return nil
 	}))
 
 	if role == "host" {
-		// HostがDataChannelを生成
+		// HostがDataChannelを作成
 		dc := pc.Call("createDataChannel", "gameData")
 		setupDataChannel(dc)
 
-		// SDP Offer の生成
+		// Offer作成
 		promise := pc.Call("createOffer")
 		promise.Call("then", js.FuncOf(func(this js.Value, args []js.Value) any {
 			offer := args[0]
 			pc.Call("setLocalDescription", offer)
-			sendSignal(map[string]any{
-				"type": "offer",
-				"sdp":  offer,
-			})
+			sendJSSignal("offer", "sdp", offer)
 			return nil
 		}))
 	} else {
-		// JoinerはDataChannelの受信を待つ
+		// JoinerはDataChannel受信を待機
 		pc.Set("ondatachannel", js.FuncOf(func(this js.Value, args []js.Value) any {
 			dc := args[0].Get("channel")
 			setupDataChannel(dc)
@@ -169,10 +177,7 @@ func handleOffer(offer js.Value) {
 	promise.Call("then", js.FuncOf(func(this js.Value, args []js.Value) any {
 		answer := args[0]
 		pc.Call("setLocalDescription", answer)
-		sendSignal(map[string]any{
-			"type": "answer",
-			"sdp":  answer,
-		})
+		sendJSSignal("answer", "sdp", answer)
 		return nil
 	}))
 }
@@ -189,7 +194,9 @@ func setupDataChannel(dc js.Value) {
 	dataChannel.Set("onmessage", js.FuncOf(func(this js.Value, args []js.Value) any {
 		dataStr := args[0].Get("data").String()
 		var msg Message
-		json.Unmarshal([]byte(dataStr), &msg)
+		if err := json.Unmarshal([]byte(dataStr), &msg); err != nil {
+			return nil
+		}
 
 		peerPaddleY = msg.Y
 		leftScore = msg.LeftScore
@@ -203,12 +210,6 @@ func setupDataChannel(dc js.Value) {
 	}))
 }
 
-func sendSignal(data map[string]any) {
-	b, _ := json.Marshal(data)
-	ws.Call("send", string(b))
-}
-
-// P2P (DataChannel) 経由でゲーム状態を直接送信
 func sendStateP2P() {
 	if !p2pReady || dataChannel.Get("readyState").String() != "open" {
 		return
@@ -346,7 +347,6 @@ func draw() {
 	ctx.Call("stroke")
 	ctx.Call("setLineDash", []any{})
 
-	// 接続待機中の表示
 	if !p2pReady {
 		ctx.Set("fillStyle", "yellow")
 		ctx.Set("font", "20px sans-serif")
