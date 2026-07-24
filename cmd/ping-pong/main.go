@@ -43,6 +43,7 @@ var (
 
 // タッチ移動用（相対移動）の変数
 var (
+	lastTouchY   float64
 	touchStartY  float64
 	paddleStartY float64
 	isTouching   bool
@@ -114,43 +115,60 @@ func setupInputHandlers() {
 		return nil
 	}))
 
-	// --- スマホ用（バーチャルボタン方式：座標計算なし） ---
+	// --- スマホ用（真のスクロール・スライド操作） ---
 
-	// タッチ時 / タッチ移動時
-	handleTouch := js.FuncOf(func(this js.Value, args []js.Value) any {
+	// 1. 指が触れた瞬間：現在の指のY位置を記憶するだけ（パドルは絶対動かない）
+	handleTouchStart := js.FuncOf(func(this js.Value, args []js.Value) any {
 		e := args[0]
-		e.Call("preventDefault") // スクロール防止
+		e.Call("preventDefault")
 
 		touches := e.Get("touches")
 		if touches.Get("length").Int() > 0 {
 			touch := touches.Index(0)
-			clientY := touch.Get("clientY").Float()
-
-			// 画面全体の高さ（ブラウザの表示域）
-			windowHeight := js.Global().Get("innerHeight").Float()
-
-			// 画面の上半分か下半分かで判断
-			if clientY < windowHeight/2 {
-				upPressed = true
-				downPressed = false
-			} else {
-				upPressed = false
-				downPressed = true
-			}
+			lastTouchY = touch.Get("clientY").Float()
+			isTouching = true
 		}
 		return nil
 	})
 
-	// 指を離した時 ➡️ 移動停止
-	handleTouchEnd := js.FuncOf(func(this js.Value, args []js.Value) any {
-		upPressed = false
-		downPressed = false
+	// 2. 指を動かした時：「直前の指の位置からの差分」だけパドルを動かす
+	handleTouchMove := js.FuncOf(func(this js.Value, args []js.Value) any {
+		e := args[0]
+		e.Call("preventDefault")
+
+		touches := e.Get("touches")
+		if touches.Get("length").Int() > 0 {
+			touch := touches.Index(0)
+			currentY := touch.Get("clientY").Float()
+
+			if isTouching {
+				rect := canvas.Call("getBoundingClientRect")
+				rectHeight := rect.Get("height").Float()
+				scaleY := canvasHeight / rectHeight
+
+				// 直前のイベントからの移動量（差分 Delta）
+				deltaY := (currentY - lastTouchY) * scaleY
+
+				// パドルを移動量分だけ更新
+				myPaddleY += deltaY
+				clampPaddle()
+			}
+
+			// 次のフレームのために最新のY位置を更新
+			lastTouchY = currentY
+		}
 		return nil
 	})
 
-	// 画面全体（doc）に登録
-	doc.Call("addEventListener", "touchstart", handleTouch, map[string]any{"passive": false})
-	doc.Call("addEventListener", "touchmove", handleTouch, map[string]any{"passive": false})
+	// 3. 指を離した時
+	handleTouchEnd := js.FuncOf(func(this js.Value, args []js.Value) any {
+		isTouching = false
+		return nil
+	})
+
+	// 画面全体（doc）にイベントリスナーを登録
+	doc.Call("addEventListener", "touchstart", handleTouchStart, map[string]any{"passive": false})
+	doc.Call("addEventListener", "touchmove", handleTouchMove, map[string]any{"passive": false})
 	doc.Call("addEventListener", "touchend", handleTouchEnd, map[string]any{"passive": false})
 	doc.Call("addEventListener", "touchcancel", handleTouchEnd, map[string]any{"passive": false})
 }
