@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -11,62 +10,73 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true }, // CORS許可
+	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
 type Client struct {
 	conn *websocket.Conn
 	peer *Client
+	role string
 }
 
 var (
-	mu            sync.Mutex
+	mutex         sync.Mutex
 	waitingClient *Client
 )
 
 func handleWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("Upgrade error:", err)
+		log.Println("Upgrade err:", err)
 		return
 	}
 
 	client := &Client{conn: conn}
 
-	mu.Lock()
-	if waitingClient != nil {
-		// 待機中がいればペアリング
+	mutex.Lock()
+	if waitingClient == nil {
+		// 1名目: Host
+		client.role = "host"
+		waitingClient = client
+		mutex.Unlock()
+
+		log.Println("Client A connected (Host), waiting for peer...")
+		conn.WriteJSON(map[string]string{"type": "paired", "role": "host"})
+	} else {
+		// 2名目: Joiner
+		client.role = "joiner"
 		peer := waitingClient
 		waitingClient = nil
-		mu.Unlock()
+		mutex.Unlock()
 
 		client.peer = peer
 		peer.peer = client
 
-		// ホストとゲストの割り当て
+		log.Println("Client B connected (Joiner), pairing complete!")
+
+		// 両者に通知
 		peer.conn.WriteJSON(map[string]string{"type": "paired", "role": "host"})
 		client.conn.WriteJSON(map[string]string{"type": "paired", "role": "joiner"})
-
-		go relay(peer)
-		go relay(client)
-	} else {
-		waitingClient = client
-		mu.Unlock()
 	}
-}
 
-// ピアへのメッセージ転送ルーチン
-func relay(c *Client) {
+	// メッセージの中継（WebRTCシグナリングデータのパススルー）
+	defer func() {
+		conn.Close()
+		mutex.Lock()
+		if waitingClient == client {
+			waitingClient = nil
+		}
+		mutex.Unlock()
+	}()
+
 	for {
-		msgType, msg, err := c.conn.ReadMessage()
-		if err != nil {
-			if c.peer != nil && c.peer.conn != nil {
-				c.peer.conn.Close()
-			}
+		var msg map[string]any
+		if err := conn.ReadJSON(&msg); err != nil {
 			break
 		}
-		if c.peer != nil && c.peer.conn != nil {
-			c.peer.conn.WriteMessage(msgType, msg)
+		// 相手へシグナリングメッセージをそのまま転送
+		if client.peer != nil {
+			client.peer.conn.WriteJSON(msg)
 		}
 	}
 }
@@ -78,6 +88,8 @@ func main() {
 	}
 
 	http.HandleFunc("/ws", handleWS)
-	fmt.Printf("Signaling server listening on :%s...\n", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	log.Printf("Signaling server listening on :%s...", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Fatal(err)
+	}
 }

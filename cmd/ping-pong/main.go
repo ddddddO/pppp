@@ -7,7 +7,6 @@ import (
 	"syscall/js"
 )
 
-// 設定パラメータ
 const (
 	canvasWidth  = 800.0
 	canvasHeight = 400.0
@@ -16,46 +15,35 @@ const (
 	ballSize     = 10.0
 )
 
-// 状態変数
 var (
 	doc         js.Value
 	canvas      js.Value
 	ctx         js.Value
 	ws          js.Value
-	role        string // "host" または "joiner"
+	pc          js.Value // RTCPeerConnection
+	dataChannel js.Value // RTCDataChannel (P2P通信用)
+
+	role        string
+	p2pReady    bool
 	myPaddleY   = (canvasHeight - paddleHeight) / 2
 	peerPaddleY = (canvasHeight - paddleHeight) / 2
 
-	// ボール状態（Host側のみ計算）
 	ballX  = canvasWidth / 2
 	ballY  = canvasHeight / 2
 	ballVX = 4.0
 	ballVY = 4.0
 
-	// 得点（左: Host, 右: Joiner）
 	leftScore  int
 	rightScore int
 
-	// キー入力状態
 	upPressed   bool
 	downPressed bool
 )
 
-// タッチ移動用（相対移動）の変数
-var (
-	lastTouchY   float64
-	touchStartY  float64
-	paddleStartY float64
-	isTouching   bool
-)
-
-// 通信メッセージ構造体（スコア情報を追加）
 type Message struct {
-	Type       string  `json:"type"`
-	Role       string  `json:"role,omitempty"`
-	Y          float64 `json:"y,omitempty"`
-	BX         float64 `json:"bx,omitempty"`
-	BY         float64 `json:"by,omitempty"`
+	Y          float64 `json:"y"`
+	BX         float64 `json:"bx"`
+	BY         float64 `json:"by"`
 	LeftScore  int     `json:"leftScore"`
 	RightScore int     `json:"rightScore"`
 }
@@ -67,14 +55,13 @@ func main() {
 	canvas = doc.Call("getElementById", "gameCanvas")
 	ctx = canvas.Call("getContext", "2d")
 
-	// 1. 入力処理設定
 	setupInputHandlers()
 
-	// 2. WebSocket接続
+	// WebSocketシグナリングサーバー接続
 	wsURL := "wss://pppp-9hxy.onrender.com/ws"
-	setupWebSocket(wsURL)
+	setupSignaling(wsURL)
 
-	// 3. ゲームループ開始
+	// メインループ
 	var renderFrame js.Func
 	renderFrame = js.FuncOf(func(this js.Value, args []js.Value) any {
 		update()
@@ -84,15 +71,164 @@ func main() {
 	})
 	js.Global().Call("requestAnimationFrame", renderFrame)
 
-	fmt.Println("Go/WASM Game Engine Started")
+	fmt.Println("WebRTC Go/WASM Pong Started")
 	<-c
 }
 
 // --------------------------------------------------
-// 入力処理（キーボード ＆ タッチ操作）
+// WebRTC & シグナリング処理
+// --------------------------------------------------
+func setupSignaling(url string) {
+	ws = js.Global().Get("WebSocket").New(url)
+
+	ws.Set("onmessage", js.FuncOf(func(this js.Value, args []js.Value) any {
+		dataStr := args[0].Get("data").String()
+
+		var msg map[string]any
+		json.Unmarshal([]byte(dataStr), &msg)
+
+		msgType, _ := msg["type"].(string)
+
+		switch msgType {
+		case "paired":
+			role, _ = msg["role"].(string)
+			fmt.Println("Role assigned:", role)
+			initWebRTC()
+
+		case "offer":
+			if role == "joiner" {
+				offer := js.Global().Get("JSON").Call("parse", dataStr).Get("sdp")
+				handleOffer(offer)
+			}
+
+		case "answer":
+			if role == "host" {
+				answer := js.Global().Get("JSON").Call("parse", dataStr).Get("sdp")
+				pc.Call("setRemoteDescription", answer)
+			}
+
+		case "candidate":
+			candidate := js.Global().Get("JSON").Call("parse", dataStr).Get("candidate")
+			pc.Call("addIceCandidate", candidate)
+		}
+		return nil
+	}))
+}
+
+func initWebRTC() {
+	// STUN サーバー設定
+	config := map[string]any{
+		"iceServers": []any{
+			map[string]any{"urls": "stun:stun.l.google.com:19302"},
+		},
+	}
+	pc = js.Global().Get("RTCPeerConnection").New(js.ValueOf(config))
+
+	// ICE Candidate 発生時の処理
+	pc.Set("onicecandidate", js.FuncOf(func(this js.Value, args []js.Value) any {
+		evt := args[0]
+		candidate := evt.Get("candidate")
+		if !candidate.IsNull() && !candidate.IsUndefined() {
+			sendSignal(map[string]any{
+				"type":      "candidate",
+				"candidate": candidate,
+			})
+		}
+		return nil
+	}))
+
+	if role == "host" {
+		// HostがDataChannelを生成
+		dc := pc.Call("createDataChannel", "gameData")
+		setupDataChannel(dc)
+
+		// SDP Offer の生成
+		promise := pc.Call("createOffer")
+		promise.Call("then", js.FuncOf(func(this js.Value, args []js.Value) any {
+			offer := args[0]
+			pc.Call("setLocalDescription", offer)
+			sendSignal(map[string]any{
+				"type": "offer",
+				"sdp":  offer,
+			})
+			return nil
+		}))
+	} else {
+		// JoinerはDataChannelの受信を待つ
+		pc.Set("ondatachannel", js.FuncOf(func(this js.Value, args []js.Value) any {
+			dc := args[0].Get("channel")
+			setupDataChannel(dc)
+			return nil
+		}))
+	}
+}
+
+func handleOffer(offer js.Value) {
+	pc.Call("setRemoteDescription", offer)
+	promise := pc.Call("createAnswer")
+	promise.Call("then", js.FuncOf(func(this js.Value, args []js.Value) any {
+		answer := args[0]
+		pc.Call("setLocalDescription", answer)
+		sendSignal(map[string]any{
+			"type": "answer",
+			"sdp":  answer,
+		})
+		return nil
+	}))
+}
+
+func setupDataChannel(dc js.Value) {
+	dataChannel = dc
+
+	dataChannel.Set("onopen", js.FuncOf(func(this js.Value, args []js.Value) any {
+		fmt.Println("WebRTC DataChannel OPEN! P2P Connected!")
+		p2pReady = true
+		return nil
+	}))
+
+	dataChannel.Set("onmessage", js.FuncOf(func(this js.Value, args []js.Value) any {
+		dataStr := args[0].Get("data").String()
+		var msg Message
+		json.Unmarshal([]byte(dataStr), &msg)
+
+		peerPaddleY = msg.Y
+		leftScore = msg.LeftScore
+		rightScore = msg.RightScore
+
+		if role == "joiner" {
+			ballX = msg.BX
+			ballY = msg.BY
+		}
+		return nil
+	}))
+}
+
+func sendSignal(data map[string]any) {
+	b, _ := json.Marshal(data)
+	ws.Call("send", string(b))
+}
+
+// P2P (DataChannel) 経由でゲーム状態を直接送信
+func sendStateP2P() {
+	if !p2pReady || dataChannel.Get("readyState").String() != "open" {
+		return
+	}
+
+	msg := Message{
+		Y:          myPaddleY,
+		BX:         ballX,
+		BY:         ballY,
+		LeftScore:  leftScore,
+		RightScore: rightScore,
+	}
+	b, _ := json.Marshal(msg)
+	dataChannel.Call("send", string(b))
+}
+
+// --------------------------------------------------
+// 入力・ロジック・描画処理
 // --------------------------------------------------
 func setupInputHandlers() {
-	// キーボード（PC）
 	doc.Call("addEventListener", "keydown", js.FuncOf(func(this js.Value, args []js.Value) any {
 		key := args[0].Get("key").String()
 		if key == "ArrowUp" || key == "w" {
@@ -115,62 +251,25 @@ func setupInputHandlers() {
 		return nil
 	}))
 
-	// --- スマホ用（真のスクロール・スライド操作） ---
-
-	// 1. 指が触れた瞬間：現在の指のY位置を記憶するだけ（パドルは絶対動かない）
-	handleTouchStart := js.FuncOf(func(this js.Value, args []js.Value) any {
+	handleTouch := js.FuncOf(func(this js.Value, args []js.Value) any {
 		e := args[0]
 		e.Call("preventDefault")
-
 		touches := e.Get("touches")
 		if touches.Get("length").Int() > 0 {
 			touch := touches.Index(0)
-			lastTouchY = touch.Get("clientY").Float()
-			isTouching = true
+			rect := canvas.Call("getBoundingClientRect")
+			clientY := touch.Get("clientY").Float()
+			rectTop := rect.Get("top").Float()
+			rectHeight := rect.Get("height").Float()
+			scaleY := canvasHeight / rectHeight
+			myPaddleY = (clientY-rectTop)*scaleY - (paddleHeight / 2)
+			clampPaddle()
 		}
 		return nil
 	})
 
-	// 2. 指を動かした時：「直前の指の位置からの差分」だけパドルを動かす
-	handleTouchMove := js.FuncOf(func(this js.Value, args []js.Value) any {
-		e := args[0]
-		e.Call("preventDefault")
-
-		touches := e.Get("touches")
-		if touches.Get("length").Int() > 0 {
-			touch := touches.Index(0)
-			currentY := touch.Get("clientY").Float()
-
-			if isTouching {
-				rect := canvas.Call("getBoundingClientRect")
-				rectHeight := rect.Get("height").Float()
-				scaleY := canvasHeight / rectHeight
-
-				// 直前のイベントからの移動量（差分 Delta）
-				deltaY := (currentY - lastTouchY) * scaleY
-
-				// パドルを移動量分だけ更新
-				myPaddleY += deltaY
-				clampPaddle()
-			}
-
-			// 次のフレームのために最新のY位置を更新
-			lastTouchY = currentY
-		}
-		return nil
-	})
-
-	// 3. 指を離した時
-	handleTouchEnd := js.FuncOf(func(this js.Value, args []js.Value) any {
-		isTouching = false
-		return nil
-	})
-
-	// 画面全体（doc）にイベントリスナーを登録
-	doc.Call("addEventListener", "touchstart", handleTouchStart, map[string]any{"passive": false})
-	doc.Call("addEventListener", "touchmove", handleTouchMove, map[string]any{"passive": false})
-	doc.Call("addEventListener", "touchend", handleTouchEnd, map[string]any{"passive": false})
-	doc.Call("addEventListener", "touchcancel", handleTouchEnd, map[string]any{"passive": false})
+	canvas.Call("addEventListener", "touchstart", handleTouch, map[string]any{"passive": false})
+	canvas.Call("addEventListener", "touchmove", handleTouch, map[string]any{"passive": false})
 }
 
 func clampPaddle() {
@@ -182,60 +281,6 @@ func clampPaddle() {
 	}
 }
 
-// --------------------------------------------------
-// WebSocket通信処理
-// --------------------------------------------------
-func setupWebSocket(url string) {
-	ws = js.Global().Get("WebSocket").New(url)
-
-	ws.Set("onmessage", js.FuncOf(func(this js.Value, args []js.Value) any {
-		data := args[0].Get("data").String()
-		var msg Message
-		if err := json.Unmarshal([]byte(data), &msg); err != nil {
-			return nil
-		}
-
-		switch msg.Type {
-		case "paired":
-			role = msg.Role
-			fmt.Println("Paired as role:", role)
-		case "state":
-			// 相手のパドル位置はどちらも更新
-			peerPaddleY = msg.Y
-
-			// 💡 Joiner（ゲスト）のみ、Host（ホスト）から送られてきたスコアとボール位置を反映する
-			// （Host側は自身のスコアがJoinerの0で上書きされるのを防ぐ）
-			if role == "joiner" {
-				leftScore = msg.LeftScore
-				rightScore = msg.RightScore
-				ballX = msg.BX
-				ballY = msg.BY
-			}
-		}
-		return nil
-	}))
-}
-
-func sendState() {
-	if ws.Get("readyState").Int() != 1 {
-		return
-	}
-
-	msg := Message{
-		Type:       "state",
-		Y:          myPaddleY,
-		BX:         ballX,
-		BY:         ballY,
-		LeftScore:  leftScore,
-		RightScore: rightScore,
-	}
-	b, _ := json.Marshal(msg)
-	ws.Call("send", string(b))
-}
-
-// --------------------------------------------------
-// ゲームロジック ＆ 描画処理
-// --------------------------------------------------
 func update() {
 	if upPressed {
 		myPaddleY -= 6.0
@@ -249,43 +294,35 @@ func update() {
 		ballX += ballVX
 		ballY += ballVY
 
-		// 上下壁バウンド
 		if ballY <= 0 || ballY >= canvasHeight-ballSize {
 			ballVY *= -1
 		}
 
-		// --- パドル当たり判定（Host側で計算） ---
-
-		// 左パドル（Host自身）：厳密に判定
-		if ballX <= paddleWidth &&
-			ballY+ballSize >= myPaddleY && ballY <= myPaddleY+paddleHeight {
+		if ballX <= paddleWidth && ballY+ballSize >= myPaddleY && ballY <= myPaddleY+paddleHeight {
 			ballVX *= -1
-			ballX = paddleWidth // すり抜け防止の補正
+			ballX = paddleWidth
 		}
 
-		// 右パドル（Joiner）：通信ラグを考慮し、判定を甘く（広く）する
-		paddleMarginY := 20.0 // 💡 上下に20pxずれていても「当たり」とするマージン
+		paddleMarginY := 20.0
 		if ballX >= canvasWidth-paddleWidth-ballSize &&
-			ballY+ballSize >= (peerPaddleY-paddleMarginY) && // 💡 マージンを加味
-			ballY <= (peerPaddleY+paddleHeight+paddleMarginY) { // 💡 マージンを加味
+			ballY+ballSize >= (peerPaddleY-paddleMarginY) &&
+			ballY <= (peerPaddleY+paddleHeight+paddleMarginY) {
 			ballVX *= -1
-			ballX = canvasWidth - paddleWidth - ballSize // すり抜け防止の補正
+			ballX = canvasWidth - paddleWidth - ballSize
 		}
 
-		// --- 得点判定 ＆ ボールリセット ---
 		if ballX < 0 {
-			rightScore++ // 右プレイヤー（Joiner）の得点
+			rightScore++
 			resetBall(1)
 		} else if ballX > canvasWidth {
-			leftScore++ // 左プレイヤー（Host）の得点
+			leftScore++
 			resetBall(-1)
 		}
 	}
 
-	sendState()
+	sendStateP2P()
 }
 
-// ボールを中心に戻す処理
 func resetBall(dirX float64) {
 	ballX = canvasWidth / 2
 	ballY = canvasHeight / 2
@@ -298,11 +335,9 @@ func resetBall(dirX float64) {
 }
 
 func draw() {
-	// 背景クリア
 	ctx.Set("fillStyle", "black")
 	ctx.Call("fillRect", 0, 0, canvasWidth, canvasHeight)
 
-	// 中央点線
 	ctx.Set("strokeStyle", "white")
 	ctx.Call("setLineDash", []any{5, 5})
 	ctx.Call("beginPath")
@@ -311,22 +346,27 @@ func draw() {
 	ctx.Call("stroke")
 	ctx.Call("setLineDash", []any{})
 
-	// スコア描画
+	// 接続待機中の表示
+	if !p2pReady {
+		ctx.Set("fillStyle", "yellow")
+		ctx.Set("font", "20px sans-serif")
+		ctx.Set("textAlign", "center")
+		ctx.Call("fillText", "Connecting P2P (WebRTC)...", canvasWidth/2, canvasHeight/2)
+		return
+	}
+
 	ctx.Set("fillStyle", "white")
 	ctx.Set("font", "48px sans-serif")
 	ctx.Set("textAlign", "center")
 	ctx.Call("fillText", fmt.Sprintf("%d", leftScore), canvasWidth/4, 60)
 	ctx.Call("fillText", fmt.Sprintf("%d", rightScore), (canvasWidth*3)/4, 60)
 
-	// パドル描画
 	leftY, rightY := myPaddleY, peerPaddleY
 	if role == "joiner" {
 		leftY, rightY = peerPaddleY, myPaddleY
 	}
 
-	ctx.Call("fillRect", 0, leftY, paddleWidth, paddleHeight)                        // 左パドル
-	ctx.Call("fillRect", canvasWidth-paddleWidth, rightY, paddleWidth, paddleHeight) // 右パドル
-
-	// ボール描画
+	ctx.Call("fillRect", 0, leftY, paddleWidth, paddleHeight)
+	ctx.Call("fillRect", canvasWidth-paddleWidth, rightY, paddleWidth, paddleHeight)
 	ctx.Call("fillRect", ballX, ballY, ballSize, ballSize)
 }
