@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"syscall/js"
 )
 
@@ -31,18 +32,24 @@ var (
 	ballVX = 4.0
 	ballVY = 4.0
 
+	// 得点（左: Host, 右: Joiner）
+	leftScore  int
+	rightScore int
+
 	// キー入力状態
 	upPressed   bool
 	downPressed bool
 )
 
-// 通信メッセージ構造体
+// 通信メッセージ構造体（スコア情報を追加）
 type Message struct {
-	Type string  `json:"type"`
-	Role string  `json:"role,omitempty"`
-	Y    float64 `json:"y,omitempty"`
-	BX   float64 `json:"bx,omitempty"`
-	BY   float64 `json:"by,omitempty"`
+	Type       string  `json:"type"`
+	Role       string  `json:"role,omitempty"`
+	Y          float64 `json:"y,omitempty"`
+	BX         float64 `json:"bx,omitempty"`
+	BY         float64 `json:"by,omitempty"`
+	LeftScore  int     `json:"leftScore"`
+	RightScore int     `json:"rightScore"`
 }
 
 func main() {
@@ -52,7 +59,7 @@ func main() {
 	canvas = doc.Call("getElementById", "gameCanvas")
 	ctx = canvas.Call("getContext", "2d")
 
-	// 1. キーボード・タッチイベントの登録
+	// 1. 入力処理設定
 	setupInputHandlers()
 
 	// 2. WebSocket接続
@@ -77,7 +84,6 @@ func main() {
 // 入力処理（キーボード ＆ タッチ操作）
 // --------------------------------------------------
 func setupInputHandlers() {
-	// キーボード（PC）
 	doc.Call("addEventListener", "keydown", js.FuncOf(func(this js.Value, args []js.Value) any {
 		key := args[0].Get("key").String()
 		if key == "ArrowUp" || key == "w" {
@@ -100,33 +106,28 @@ func setupInputHandlers() {
 		return nil
 	}))
 
-	// タッチ操作関数（TouchStart / TouchMove 共通）
 	handleTouch := js.FuncOf(func(this js.Value, args []js.Value) any {
 		e := args[0]
-		e.Call("preventDefault") // スマホの画面スクロールを防止
+		e.Call("preventDefault")
 
 		touches := e.Get("touches")
 		if touches.Get("length").Int() > 0 {
 			touch := touches.Index(0)
 			rect := canvas.Call("getBoundingClientRect")
 
-			// Canvas内でのY座標を計算
 			clientY := touch.Get("clientY").Float()
 			rectTop := rect.Get("top").Float()
 			rectHeight := rect.Get("height").Float()
 
-			// 表示サイズと内部解像度（400px）のスケール比率を補正
 			scaleY := canvasHeight / rectHeight
 			canvasTouchY := (clientY - rectTop) * scaleY
 
-			// パドルの中心に指が来るよう設定
 			myPaddleY = canvasTouchY - (paddleHeight / 2)
 			clampPaddle()
 		}
 		return nil
 	})
 
-	// スマホ（Touch）イベント登録
 	canvas.Call("addEventListener", "touchstart", handleTouch, map[string]any{"passive": false})
 	canvas.Call("addEventListener", "touchmove", handleTouch, map[string]any{"passive": false})
 }
@@ -158,9 +159,11 @@ func setupWebSocket(url string) {
 			role = msg.Role
 			fmt.Println("Paired as role:", role)
 		case "state":
-			// 相手のパドル位置を受信
 			peerPaddleY = msg.Y
-			// Joinerの場合はHostから送られたボール位置も同期
+			leftScore = msg.LeftScore
+			rightScore = msg.RightScore
+
+			// JoinerはHostから送られたボール座標を同期
 			if role == "joiner" {
 				ballX = msg.BX
 				ballY = msg.BY
@@ -171,15 +174,17 @@ func setupWebSocket(url string) {
 }
 
 func sendState() {
-	if ws.Get("readyState").Int() != 1 { // 1 = OPEN
+	if ws.Get("readyState").Int() != 1 {
 		return
 	}
 
 	msg := Message{
-		Type: "state",
-		Y:    myPaddleY,
-		BX:   ballX,
-		BY:   ballY,
+		Type:       "state",
+		Y:          myPaddleY,
+		BX:         ballX,
+		BY:         ballY,
+		LeftScore:  leftScore,
+		RightScore: rightScore,
 	}
 	b, _ := json.Marshal(msg)
 	ws.Call("send", string(b))
@@ -189,7 +194,6 @@ func sendState() {
 // ゲームロジック ＆ 描画処理
 // --------------------------------------------------
 func update() {
-	// キーボード移動
 	if upPressed {
 		myPaddleY -= 6.0
 	}
@@ -198,7 +202,6 @@ func update() {
 	}
 	clampPaddle()
 
-	// Hostがボールの物理演算と判定を担当
 	if role == "host" {
 		ballX += ballVX
 		ballY += ballVY
@@ -208,7 +211,7 @@ func update() {
 			ballVY *= -1
 		}
 
-		// パドル当たり判定（左: Host, 右: Joiner）
+		// パドル当たり判定
 		if ballX <= paddleWidth && ballY >= myPaddleY && ballY <= myPaddleY+paddleHeight {
 			ballVX *= -1
 		}
@@ -216,15 +219,29 @@ func update() {
 			ballVX *= -1
 		}
 
-		// 得点リセット
-		if ballX < 0 || ballX > canvasWidth {
-			ballX = canvasWidth / 2
-			ballY = canvasHeight / 2
+		// 得点判定 ＆ ボールリセット
+		if ballX < 0 {
+			rightScore++ // 右プレイヤー（Joiner）の得点
+			resetBall(1)
+		} else if ballX > canvasWidth {
+			leftScore++ // 左プレイヤー（Host）の得点
+			resetBall(-1)
 		}
 	}
 
-	// 位置情報を相手へ送信
 	sendState()
+}
+
+// ボールを中心に戻す処理
+func resetBall(dirX float64) {
+	ballX = canvasWidth / 2
+	ballY = canvasHeight / 2
+	ballVX = 4.0 * dirX
+	if rand.Intn(2) == 0 {
+		ballVY = 4.0
+	} else {
+		ballVY = -4.0
+	}
 }
 
 func draw() {
@@ -239,15 +256,21 @@ func draw() {
 	ctx.Call("moveTo", canvasWidth/2, 0)
 	ctx.Call("lineTo", canvasWidth/2, canvasHeight)
 	ctx.Call("stroke")
-	ctx.Call("setLineDash", []any{}) // クリア
+	ctx.Call("setLineDash", []any{})
 
-	// パドル描画（左と右の位置決定）
+	// スコア描画
+	ctx.Set("fillStyle", "white")
+	ctx.Set("font", "48px sans-serif")
+	ctx.Set("textAlign", "center")
+	ctx.Call("fillText", fmt.Sprintf("%d", leftScore), canvasWidth/4, 60)
+	ctx.Call("fillText", fmt.Sprintf("%d", rightScore), (canvasWidth*3)/4, 60)
+
+	// パドル描画
 	leftY, rightY := myPaddleY, peerPaddleY
 	if role == "joiner" {
 		leftY, rightY = peerPaddleY, myPaddleY
 	}
 
-	ctx.Set("fillStyle", "white")
 	ctx.Call("fillRect", 0, leftY, paddleWidth, paddleHeight)                        // 左パドル
 	ctx.Call("fillRect", canvasWidth-paddleWidth, rightY, paddleWidth, paddleHeight) // 右パドル
 
