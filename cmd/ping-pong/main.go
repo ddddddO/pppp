@@ -368,11 +368,18 @@ func draw() {
 	ctx.Call("fillText", fmt.Sprintf("%d", leftScore), canvasWidth/4, 60)
 	ctx.Call("fillText", fmt.Sprintf("%d", rightScore), (canvasWidth*3)/4, 60)
 
+	ctx.Set("font", "16px sans-serif")
+	leftID, rightID := myID, peerID
+	if role == "joiner" {
+		leftID, rightID = peerID, myID
+	}
+	ctx.Call("fillText", leftID, canvasWidth/4, 90)
+	ctx.Call("fillText", rightID, (canvasWidth*3)/4, 90)
+
 	leftY, rightY := myPaddleY, peerPaddleY
 	if role == "joiner" {
 		leftY, rightY = peerPaddleY, myPaddleY
 	}
-
 	ctx.Call("fillRect", 0, leftY, paddleWidth, paddleHeight)
 	ctx.Call("fillRect", canvasWidth-paddleWidth, rightY, paddleWidth, paddleHeight)
 	ctx.Call("fillRect", ballX, ballY, ballSize, ballSize)
