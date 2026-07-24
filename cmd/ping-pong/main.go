@@ -1,264 +1,256 @@
-//go:build js && asm
-
 package main
 
 import (
 	"encoding/json"
 	"fmt"
-	"image/color"
-	"log"
 	"syscall/js"
-
-	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 )
 
+// 設定パラメータ
 const (
-	wsURL = "wss://pppp-9hxy.onrender.com/ws"
-
-	screenWidth  = 640
-	screenHeight = 480
-	paddleWidth  = 10
-	paddleHeight = 60
-	ballSize     = 10
+	canvasWidth  = 800.0
+	canvasHeight = 400.0
+	paddleWidth  = 10.0
+	paddleHeight = 80.0
+	ballSize     = 10.0
 )
 
-// ゲームの状態管理
-type Game struct {
-	myPaddleY float64
-	opPaddleY float64
-	ballX     float64
-	ballY     float64
-	ballDX    float64
-	ballDY    float64
-
-	isHost    bool
-	connected bool
-	statusMsg string
-}
-
-// 互いに送受信するデータの構造体
-type GameState struct {
-	Type    string  `json:"type"`
-	PaddleY float64 `json:"paddleY"`
-	BallX   float64 `json:"ballX,omitempty"` // ホストのみ送信
-	BallY   float64 `json:"ballY,omitempty"`
-}
-
+// 状態変数
 var (
-	game = &Game{
-		myPaddleY: screenHeight/2 - paddleHeight/2,
-		opPaddleY: screenHeight/2 - paddleHeight/2,
-		ballX:     screenWidth / 2,
-		ballY:     screenHeight / 2,
-		ballDX:    4,
-		ballDY:    4,
-		statusMsg: "Connecting to server...",
-	}
-	dataChannel js.Value
-	window      = js.Global()
-	pc          js.Value
+	doc         js.Value
+	canvas      js.Value
+	ctx         js.Value
 	ws          js.Value
+	role        string // "host" または "joiner"
+	myPaddleY   = (canvasHeight - paddleHeight) / 2
+	peerPaddleY = (canvasHeight - paddleHeight) / 2
+
+	// ボール状態（Host側のみ計算）
+	ballX  = canvasWidth / 2
+	ballY  = canvasHeight / 2
+	ballVX = 4.0
+	ballVY = 4.0
+
+	// キー入力状態
+	upPressed   bool
+	downPressed bool
 )
+
+// 通信メッセージ構造体
+type Message struct {
+	Type string  `json:"type"`
+	Role string  `json:"role,omitempty"`
+	Y    float64 `json:"y,omitempty"`
+	BX   float64 `json:"bx,omitempty"`
+	BY   float64 `json:"by,omitempty"`
+}
 
 func main() {
-	// 一旦ネットワーク設定をコメントアウトしてスキップします
-	setupNetwork()
-	// シグナリングサーバーを介さない場合、↑をコメントアウト・↓をコメントインにし、強制的にゲームを開始状態（ホスト側）にする
-	// game.connected = true
-	// game.isHost = true
+	c := make(chan struct{})
 
-	ebiten.SetWindowSize(screenWidth, screenHeight)
-	ebiten.SetWindowTitle("P2P Ping Pong!")
-	if err := ebiten.RunGame(game); err != nil {
-		log.Fatal(err)
-	}
-}
+	doc = js.Global().Get("document")
+	canvas = doc.Call("getElementById", "gameCanvas")
+	ctx = canvas.Call("getContext", "2d")
 
-// --- Ebitengine のループ ---
+	// 1. キーボード・タッチイベントの登録
+	setupInputHandlers()
 
-func (g *Game) Update() error {
-	if !g.connected {
+	// 2. WebSocket接続
+	wsURL := "wss://pppp-9hxy.onrender.com/ws"
+	setupWebSocket(wsURL)
+
+	// 3. ゲームループ開始
+	var renderFrame js.Func
+	renderFrame = js.FuncOf(func(this js.Value, args []js.Value) any {
+		update()
+		draw()
+		js.Global().Call("requestAnimationFrame", renderFrame)
 		return nil
-	}
+	})
+	js.Global().Call("requestAnimationFrame", renderFrame)
 
-	// パドルの移動
-	if ebiten.IsKeyPressed(ebiten.KeyArrowUp) && g.myPaddleY > 0 {
-		g.myPaddleY -= 5
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyArrowDown) && g.myPaddleY < screenHeight-paddleHeight {
-		g.myPaddleY += 5
-	}
-
-	// ホスト側のみボールの物理演算を行う
-	if g.isHost {
-		g.ballX += g.ballDX
-		g.ballY += g.ballDY
-
-		// 上下壁の反射
-		if g.ballY <= 0 || g.ballY >= screenHeight-ballSize {
-			g.ballDY *= -1
-		}
-
-		// ホスト(左)パドルの反射
-		if g.ballX <= paddleWidth && g.ballY+ballSize >= g.myPaddleY && g.ballY <= g.myPaddleY+paddleHeight {
-			g.ballDX *= -1
-			g.ballX = paddleWidth // 埋まり防止
-		}
-		// ゲスト(右)パドルの反射
-		if g.ballX >= screenWidth-paddleWidth-ballSize && g.ballY+ballSize >= g.opPaddleY && g.ballY <= g.opPaddleY+paddleHeight {
-			g.ballDX *= -1
-			g.ballX = screenWidth - paddleWidth - ballSize
-		}
-	}
-
-	// 状態をピアに送信 (DataChannelが開いていれば)
-	if !dataChannel.IsUndefined() && !dataChannel.IsNull() && dataChannel.Get("readyState").String() == "open" {
-		state := GameState{
-			Type:    "state",
-			PaddleY: g.myPaddleY,
-		}
-		if g.isHost {
-			state.BallX = g.ballX
-			state.BallY = g.ballY
-		}
-		b, _ := json.Marshal(state)
-		dataChannel.Call("send", string(b))
-	}
-
-	return nil
+	fmt.Println("Go/WASM Game Engine Started")
+	<-c
 }
 
-func (g *Game) Draw(screen *ebiten.Image) {
-	if !g.connected {
-		ebitenutil.DebugPrint(screen, g.statusMsg)
+// --------------------------------------------------
+// 入力処理（キーボード ＆ タッチ操作）
+// --------------------------------------------------
+func setupInputHandlers() {
+	// キーボード（PC）
+	doc.Call("addEventListener", "keydown", js.FuncOf(func(this js.Value, args []js.Value) any {
+		key := args[0].Get("key").String()
+		if key == "ArrowUp" || key == "w" {
+			upPressed = true
+		}
+		if key == "ArrowDown" || key == "s" {
+			downPressed = true
+		}
+		return nil
+	}))
+
+	doc.Call("addEventListener", "keyup", js.FuncOf(func(this js.Value, args []js.Value) any {
+		key := args[0].Get("key").String()
+		if key == "ArrowUp" || key == "w" {
+			upPressed = false
+		}
+		if key == "ArrowDown" || key == "s" {
+			downPressed = false
+		}
+		return nil
+	}))
+
+	// タッチ操作関数（TouchStart / TouchMove 共通）
+	handleTouch := js.FuncOf(func(this js.Value, args []js.Value) any {
+		e := args[0]
+		e.Call("preventDefault") // スマホの画面スクロールを防止
+
+		touches := e.Get("touches")
+		if touches.Get("length").Int() > 0 {
+			touch := touches.Index(0)
+			rect := canvas.Call("getBoundingClientRect")
+
+			// Canvas内でのY座標を計算
+			clientY := touch.Get("clientY").Float()
+			rectTop := rect.Get("top").Float()
+			rectHeight := rect.Get("height").Float()
+
+			// 表示サイズと内部解像度（400px）のスケール比率を補正
+			scaleY := canvasHeight / rectHeight
+			canvasTouchY := (clientY - rectTop) * scaleY
+
+			// パドルの中心に指が来るよう設定
+			myPaddleY = canvasTouchY - (paddleHeight / 2)
+			clampPaddle()
+		}
+		return nil
+	})
+
+	// スマホ（Touch）イベント登録
+	canvas.Call("addEventListener", "touchstart", handleTouch, map[string]any{"passive": false})
+	canvas.Call("addEventListener", "touchmove", handleTouch, map[string]any{"passive": false})
+}
+
+func clampPaddle() {
+	if myPaddleY < 0 {
+		myPaddleY = 0
+	}
+	if myPaddleY > canvasHeight-paddleHeight {
+		myPaddleY = canvasHeight - paddleHeight
+	}
+}
+
+// --------------------------------------------------
+// WebSocket通信処理
+// --------------------------------------------------
+func setupWebSocket(url string) {
+	ws = js.Global().Get("WebSocket").New(url)
+
+	ws.Set("onmessage", js.FuncOf(func(this js.Value, args []js.Value) any {
+		data := args[0].Get("data").String()
+		var msg Message
+		if err := json.Unmarshal([]byte(data), &msg); err != nil {
+			return nil
+		}
+
+		switch msg.Type {
+		case "paired":
+			role = msg.Role
+			fmt.Println("Paired as role:", role)
+		case "state":
+			// 相手のパドル位置を受信
+			peerPaddleY = msg.Y
+			// Joinerの場合はHostから送られたボール位置も同期
+			if role == "joiner" {
+				ballX = msg.BX
+				ballY = msg.BY
+			}
+		}
+		return nil
+	}))
+}
+
+func sendState() {
+	if ws.Get("readyState").Int() != 1 { // 1 = OPEN
 		return
 	}
 
-	// 描画位置の決定（ホストは左、ゲストは右）
-	myPadX, opPadX := 0.0, float64(screenWidth-paddleWidth)
-	if !g.isHost {
-		myPadX, opPadX = opPadX, myPadX
+	msg := Message{
+		Type: "state",
+		Y:    myPaddleY,
+		BX:   ballX,
+		BY:   ballY,
+	}
+	b, _ := json.Marshal(msg)
+	ws.Call("send", string(b))
+}
+
+// --------------------------------------------------
+// ゲームロジック ＆ 描画処理
+// --------------------------------------------------
+func update() {
+	// キーボード移動
+	if upPressed {
+		myPaddleY -= 6.0
+	}
+	if downPressed {
+		myPaddleY += 6.0
+	}
+	clampPaddle()
+
+	// Hostがボールの物理演算と判定を担当
+	if role == "host" {
+		ballX += ballVX
+		ballY += ballVY
+
+		// 上下壁バウンド
+		if ballY <= 0 || ballY >= canvasHeight-ballSize {
+			ballVY *= -1
+		}
+
+		// パドル当たり判定（左: Host, 右: Joiner）
+		if ballX <= paddleWidth && ballY >= myPaddleY && ballY <= myPaddleY+paddleHeight {
+			ballVX *= -1
+		}
+		if ballX >= canvasWidth-paddleWidth-ballSize && ballY >= peerPaddleY && ballY <= peerPaddleY+paddleHeight {
+			ballVX *= -1
+		}
+
+		// 得点リセット
+		if ballX < 0 || ballX > canvasWidth {
+			ballX = canvasWidth / 2
+			ballY = canvasHeight / 2
+		}
 	}
 
-	ebitenutil.DrawRect(screen, myPadX, g.myPaddleY, paddleWidth, paddleHeight, color.White)
-	ebitenutil.DrawRect(screen, opPadX, g.opPaddleY, paddleWidth, paddleHeight, color.RGBA{255, 0, 0, 255})
-	ebitenutil.DrawRect(screen, g.ballX, g.ballY, ballSize, ballSize, color.White)
+	// 位置情報を相手へ送信
+	sendState()
 }
 
-func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
-	return screenWidth, screenHeight
-}
+func draw() {
+	// 背景クリア
+	ctx.Set("fillStyle", "black")
+	ctx.Call("fillRect", 0, 0, canvasWidth, canvasHeight)
 
-// --- WebRTC / WebSocket 通信処理 ---
+	// 中央点線
+	ctx.Set("strokeStyle", "white")
+	ctx.Call("setLineDash", []any{5, 5})
+	ctx.Call("beginPath")
+	ctx.Call("moveTo", canvasWidth/2, 0)
+	ctx.Call("lineTo", canvasWidth/2, canvasHeight)
+	ctx.Call("stroke")
+	ctx.Call("setLineDash", []any{}) // クリア
 
-func setupNetwork() {
-	ws = window.Get("WebSocket").New(wsURL)
+	// パドル描画（左と右の位置決定）
+	leftY, rightY := myPaddleY, peerPaddleY
+	if role == "joiner" {
+		leftY, rightY = peerPaddleY, myPaddleY
+	}
 
-	configJSON := `{"iceServers":[{"urls":"stun:stun.l.google.com:19302"}]}`
-	config := js.Global().Get("JSON").Call("parse", configJSON)
-	pc = window.Get("RTCPeerConnection").New(config)
+	ctx.Set("fillStyle", "white")
+	ctx.Call("fillRect", 0, leftY, paddleWidth, paddleHeight)                        // 左パドル
+	ctx.Call("fillRect", canvasWidth-paddleWidth, rightY, paddleWidth, paddleHeight) // 右パドル
 
-	// ICE候補の送信
-	pc.Set("onicecandidate", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-		candidate := args[0].Get("candidate")
-		if !candidate.IsNull() {
-			sendWS(map[string]interface{}{
-				"type":      "ice",
-				"candidate": js.Global().Get("JSON").Call("stringify", candidate).String(),
-			})
-		}
-		return nil
-	}))
-
-	// DataChannel 受信時 (ゲスト側)
-	pc.Set("ondatachannel", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-		dataChannel = args[0].Get("channel")
-		setupDataChannel(dataChannel)
-		return nil
-	}))
-
-	// WebSocket メッセージ受信
-	ws.Set("onmessage", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-		dataStr := args[0].Get("data").String()
-		var msg map[string]interface{}
-		json.Unmarshal([]byte(dataStr), &msg)
-
-		switch msg["type"] {
-		case "paired":
-			game.statusMsg = "Paired! Connecting P2P..."
-			game.isHost = msg["role"] == "host"
-			if game.isHost {
-				// ホストはDataChannelを作成してOfferを出す
-				dcOptsJSON := `{"ordered":false,"maxRetransmits":0}`
-				dcOpts := js.Global().Get("JSON").Call("parse", dcOptsJSON)
-				dataChannel = pc.Call("createDataChannel", "pong", dcOpts)
-				setupDataChannel(dataChannel)
-
-				pc.Call("createOffer").Call("then", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-					offer := args[0]
-					pc.Call("setLocalDescription", offer)
-					sendWS(map[string]interface{}{
-						"type":  "offer",
-						"offer": js.Global().Get("JSON").Call("stringify", offer).String(),
-					})
-					return nil
-				}))
-			}
-
-		case "offer":
-			offerObj := window.Get("JSON").Call("parse", msg["offer"])
-			pc.Call("setRemoteDescription", window.Get("RTCSessionDescription").New(offerObj)).Call("then", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-				pc.Call("createAnswer").Call("then", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-					answer := args[0]
-					pc.Call("setLocalDescription", answer)
-					sendWS(map[string]interface{}{
-						"type":   "answer",
-						"answer": js.Global().Get("JSON").Call("stringify", answer).String(),
-					})
-					return nil
-				}))
-				return nil
-			}))
-
-		case "answer":
-			answerObj := window.Get("JSON").Call("parse", msg["answer"])
-			pc.Call("setRemoteDescription", window.Get("RTCSessionDescription").New(answerObj))
-
-		case "ice":
-			iceObj := window.Get("JSON").Call("parse", msg["candidate"])
-			pc.Call("addIceCandidate", window.Get("RTCIceCandidate").New(iceObj))
-		}
-		return nil
-	}))
-}
-
-func setupDataChannel(dc js.Value) {
-	dc.Set("onopen", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-		game.connected = true
-		fmt.Println("DataChannel Open!")
-		return nil
-	}))
-
-	dc.Set("onmessage", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-		dataStr := args[0].Get("data").String()
-		var state GameState
-		json.Unmarshal([]byte(dataStr), &state)
-
-		if state.Type == "state" {
-			game.opPaddleY = state.PaddleY
-			// ゲスト側はホストからボールの位置も受け取って同期する
-			if !game.isHost && state.BallX != 0 {
-				// ホスト目線のX座標なので、画面を反転して描画位置を同期させないためにそのまま適用
-				game.ballX = state.BallX
-				game.ballY = state.BallY
-			}
-		}
-		return nil
-	}))
-}
-
-func sendWS(data map[string]interface{}) {
-	b, _ := json.Marshal(data)
-	ws.Call("send", string(b))
+	// ボール描画
+	ctx.Call("fillRect", ballX, ballY, ballSize, ballSize)
 }
