@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/rand"
 	"syscall/js"
-	"time"
 )
 
 const (
@@ -39,10 +38,14 @@ var (
 
 	upPressed   bool
 	downPressed bool
+
+	myID   string // 自分のユニークID
+	peerID string // 相手のユニークID
 )
 
 // P2P通信用データ構造体（Goネイティブ構造体なので json.Marshal OK）
 type Message struct {
+	PlayerID   string  `json:"playerId"`
 	Y          float64 `json:"y"`
 	BX         float64 `json:"bx"`
 	BY         float64 `json:"by"`
@@ -51,7 +54,9 @@ type Message struct {
 }
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
+	// セッションごとに異なるユニークIDを生成 (例: "Player-8F3A")
+	myID = fmt.Sprintf("Player-%04X", rand.Intn(0x10000))
+
 	c := make(chan struct{})
 
 	doc = js.Global().Get("document")
@@ -199,10 +204,11 @@ func setupDataChannel(dc js.Value) {
 		}
 
 		peerPaddleY = msg.Y
-		leftScore = msg.LeftScore
-		rightScore = msg.RightScore
+		peerID = msg.PlayerID
 
 		if role == "joiner" {
+			leftScore = msg.LeftScore
+			rightScore = msg.RightScore
 			ballX = msg.BX
 			ballY = msg.BY
 		}
@@ -216,6 +222,7 @@ func sendStateP2P() {
 	}
 
 	msg := Message{
+		PlayerID:   myID,
 		Y:          myPaddleY,
 		BX:         ballX,
 		BY:         ballY,
