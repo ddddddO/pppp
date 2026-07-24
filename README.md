@@ -9,34 +9,49 @@ If two people connect, they can play a game of table tennis!
 ## Flow
 
 ```console
-+-----------------------+                    +-----------------------+
-|  Browser (Client A)   |                    |  Browser (Client B)   |
-|  - Host (Physics)     |                    |  - Joiner (Sync)      |
-+-----------+-----------+                    +-----------+-----------+
-            |                                            |
-            |             1. WebSocket (wss://)          |
-            +-----------> [ Signaling Server ] <---------+
-            |              (Render.com)                  |
-            |                                            |
-            |             2. STUN Query (UDP)            |
-            +-----------> [   STUN Server    ] <---------+
-            |              (Google STUN)                 |
-            |                                            |
-            |             3. WebRTC DataChannel (P2P)    |
-            +============================================+
+                       +--------------------------------+
+                       | Static Web Host (GitHub Pages) |
+                       +---------------+----------------+
+                                       |
+                           1. Download WASM (HTTPS)
+                                       |
+           +---------------------------+---------------------------+
+           |                                                       |
+           v                                                       v
++--------------------+                                    +--------------------+
+| Browser (Client A) |                                    | Browser (Client B) |
++--+-------+---------+                                    +---------+-------+--+
+   |       |                                                        |       |
+   |       |          2. Matchmaking & Connection (wss://)          |       |
+   |       +----------------> [ Signaling Server ] <----------------+       |
+   |                            (Render.com)                                |
+   |                                                                        |
+   |                  3. Discover Public IP/Port (UDP)                      |
+   +------------------------> [   STUN Server    ] <------------------------+
+   |                            (Google STUN)                               |
+   |                                                                        |
+   |                  4. Exchange IP/Port Info (ICE Candidate)              |
+   |   +--------------------> [ Signaling Server ] -------------------+     |
+   |   |                        (Render.com)                          |     |
+   |   +<-------------------------------------------------------------+     |
+   |                                                                        |
+   |                  5. Direct P2P Game Data (WebRTC)                      |
+   +========================================================================+
 ```
 
-1. ブラウザ ↔ STUN サーバー
+1. ゲーム本体（WASM）のダウンロード
+1. マッチングとシグナリング接続の確立
+1. 自分のパブリックIP・ポート番号の確認
 
-    各ブラウザが直接 Google の STUN サーバーに「自分の外側から見た IP アドレスとポート番号は何？」と問い合わせて自分の接続情報（ICE Candidate）を取得します。
+    各ブラウザが自動的に STUN サーバーに問い合わせる
 
-1. ブラウザ ↔ Signaling Server ↔ ブラウザ
+1. IP・ポート情報（ICE Candidate / SDP）の交換
 
-    取得した接続情報を、Signaling Server をバケツリレーのように経由して相手のブラウザへ渡します。
+    3で判明した自分のパブリックIP・ポート番号や通信設定（SDP / ICE Candidate）を、シグナリングサーバーをバケツリレーして相手のブラウザに届ける（WebSocket経由）
 
-1. ブラウザ ↔ ブラウザ (P2P)
+1. WebRTC による P2P 直接通信の開始 
 
-    相手の IP/ポート番号が分かったら、ブラウザ同士が直接 WebRTC で繋がります。
+    お互いのIPアドレスとポート番号が揃ったため、ブラウザ同士が直接トンネル（DataChannel）を繋ぐ。ここから先は Render.com や Google のサーバーを一切通さず、パドル位置やボール座標などのゲームデータを直接やり取りする（P2P）
 
 ## Note
 - https://dashboard.render.com/project
