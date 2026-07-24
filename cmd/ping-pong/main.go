@@ -302,23 +302,29 @@ func update() {
 		ballX += ballVX
 		ballY += ballVY
 
+		// 上下壁バウンド
 		if ballY <= 0 || ballY >= canvasHeight-ballSize {
 			ballVY *= -1
 		}
 
-		if ballX <= paddleWidth && ballY+ballSize >= myPaddleY && ballY <= myPaddleY+paddleHeight {
+		// --- パドル当たり判定（Host側で計算） ---
+
+		// 左パドル（Host自身）：厳密に判定
+		if ballX <= paddleWidth &&
+			ballY+ballSize >= myPaddleY && ballY <= myPaddleY+paddleHeight {
 			ballVX *= -1
-			ballX = paddleWidth
+			ballX = paddleWidth // すり抜け防止の補正
 		}
 
-		paddleMarginY := 20.0
+		// 右パドル（Joiner）：マージンを削除し、見た目通り厳密に判定
 		if ballX >= canvasWidth-paddleWidth-ballSize &&
-			ballY+ballSize >= (peerPaddleY-paddleMarginY) &&
-			ballY <= (peerPaddleY+paddleHeight+paddleMarginY) {
+			ballY+ballSize >= peerPaddleY &&
+			ballY <= peerPaddleY+paddleHeight {
 			ballVX *= -1
-			ballX = canvasWidth - paddleWidth - ballSize
+			ballX = canvasWidth - paddleWidth - ballSize // すり抜け防止の補正
 		}
 
+		// --- 得点判定 ＆ ボールリセット ---
 		if ballX < 0 {
 			rightScore++
 			resetBall(1)
