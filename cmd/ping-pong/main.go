@@ -159,12 +159,14 @@ func setupWebSocket(url string) {
 			role = msg.Role
 			fmt.Println("Paired as role:", role)
 		case "state":
+			// 相手のパドル位置はどちらも更新
 			peerPaddleY = msg.Y
-			leftScore = msg.LeftScore
-			rightScore = msg.RightScore
 
-			// JoinerはHostから送られたボール座標を同期
+			// 💡 Joiner（ゲスト）のみ、Host（ホスト）から送られてきたスコアとボール位置を反映する
+			// （Host側は自身のスコアがJoinerの0で上書きされるのを防ぐ）
 			if role == "joiner" {
+				leftScore = msg.LeftScore
+				rightScore = msg.RightScore
 				ballX = msg.BX
 				ballY = msg.BY
 			}
