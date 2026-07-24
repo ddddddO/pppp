@@ -6,6 +6,9 @@ If two people connect, they can play a game of table tennis!
 
 ![](./assets/image.png)
 
+> [!TIP]
+> If the game doesn't start even after both players have joined, try reloading the page a few times! (This is because the instance hosting the signaling server may be down and taking a while to start up.)
+
 ## Flow
 
 ```console
