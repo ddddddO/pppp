@@ -84,6 +84,7 @@ func main() {
 // 入力処理（キーボード ＆ タッチ操作）
 // --------------------------------------------------
 func setupInputHandlers() {
+	// キーボード（PC）
 	doc.Call("addEventListener", "keydown", js.FuncOf(func(this js.Value, args []js.Value) any {
 		key := args[0].Get("key").String()
 		if key == "ArrowUp" || key == "w" {
@@ -106,9 +107,10 @@ func setupInputHandlers() {
 		return nil
 	}))
 
+	// タッチ操作（画面全体どこを触っても反応するように拡張）
 	handleTouch := js.FuncOf(func(this js.Value, args []js.Value) any {
 		e := args[0]
-		e.Call("preventDefault")
+		e.Call("preventDefault") // スマホのページスクロールを防止
 
 		touches := e.Get("touches")
 		if touches.Get("length").Int() > 0 {
@@ -119,17 +121,22 @@ func setupInputHandlers() {
 			rectTop := rect.Get("top").Float()
 			rectHeight := rect.Get("height").Float()
 
+			// 表示サイズと解像度（400px）のスケール比率を補正
 			scaleY := canvasHeight / rectHeight
 			canvasTouchY := (clientY - rectTop) * scaleY
 
+			// 指のY位置に合わせてパドルを動かす
 			myPaddleY = canvasTouchY - (paddleHeight / 2)
+
+			// 画面外を触っても、パドルが画面端でピタッと止まるように丸める
 			clampPaddle()
 		}
 		return nil
 	})
 
-	canvas.Call("addEventListener", "touchstart", handleTouch, map[string]any{"passive": false})
-	canvas.Call("addEventListener", "touchmove", handleTouch, map[string]any{"passive": false})
+	// 💡 監視先を canvas から doc（画面全体）に変更
+	doc.Call("addEventListener", "touchstart", handleTouch, map[string]any{"passive": false})
+	doc.Call("addEventListener", "touchmove", handleTouch, map[string]any{"passive": false})
 }
 
 func clampPaddle() {
@@ -213,15 +220,25 @@ func update() {
 			ballVY *= -1
 		}
 
-		// パドル当たり判定
-		if ballX <= paddleWidth && ballY >= myPaddleY && ballY <= myPaddleY+paddleHeight {
+		// --- パドル当たり判定（Host側で計算） ---
+
+		// 左パドル（Host自身）：厳密に判定
+		if ballX <= paddleWidth &&
+			ballY+ballSize >= myPaddleY && ballY <= myPaddleY+paddleHeight {
 			ballVX *= -1
-		}
-		if ballX >= canvasWidth-paddleWidth-ballSize && ballY >= peerPaddleY && ballY <= peerPaddleY+paddleHeight {
-			ballVX *= -1
+			ballX = paddleWidth // すり抜け防止の補正
 		}
 
-		// 得点判定 ＆ ボールリセット
+		// 右パドル（Joiner）：通信ラグを考慮し、判定を甘く（広く）する
+		paddleMarginY := 20.0 // 💡 上下に20pxずれていても「当たり」とするマージン
+		if ballX >= canvasWidth-paddleWidth-ballSize &&
+			ballY+ballSize >= (peerPaddleY-paddleMarginY) && // 💡 マージンを加味
+			ballY <= (peerPaddleY+paddleHeight+paddleMarginY) { // 💡 マージンを加味
+			ballVX *= -1
+			ballX = canvasWidth - paddleWidth - ballSize // すり抜け防止の補正
+		}
+
+		// --- 得点判定 ＆ ボールリセット ---
 		if ballX < 0 {
 			rightScore++ // 右プレイヤー（Joiner）の得点
 			resetBall(1)
