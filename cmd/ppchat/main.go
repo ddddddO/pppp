@@ -64,9 +64,14 @@ func main() {
 	// ICE Candidate がローカルで発見されたらシグナリングサーバー経由で送信
 	peerConnection.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
+			if *debug {
+				log.Println("[ICE] Candidate 収集完了")
+			}
 			return
 		}
 		if *debug {
+			log.Printf("[ICE] Candidate 生成: %s", c.ToJSON().Candidate)
+
 			if cc, err := c.ToICE(); err == nil {
 				log.Printf("[debug:ICE candidate] Typ: %6s, Addr: %s:%d\n", cc.Type().String(), cc.Address(), cc.Port())
 			}
@@ -82,6 +87,10 @@ func main() {
 	})
 
 	peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		if *debug {
+			log.Printf("[ICE State] %s", state.String())
+		}
+
 		if state == webrtc.ICEConnectionStateConnected {
 			pair, err := peerConnection.SCTP().Transport().ICETransport().GetSelectedCandidatePair()
 			if err == nil && pair != nil && *debug {
@@ -90,6 +99,12 @@ func main() {
 					pair.Remote.Address, pair.Remote.Port, pair.Remote.Typ,
 				)
 			}
+		}
+	})
+
+	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		if *debug {
+			log.Printf("[PeerState] %s", state.String())
 		}
 	})
 
