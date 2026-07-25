@@ -66,7 +66,7 @@ func main() {
 	setupInputHandlers()
 
 	// 1. シグナリング接続
-	wsURL := "wss://pppp-9hxy.onrender.com/ws"
+	wsURL := "wss://pppp-9hxy.onrender.com/ws_pingpong"
 	setupSignaling(wsURL)
 
 	// 2. ゲームループ

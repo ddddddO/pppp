@@ -24,7 +24,7 @@ var (
 	waitingClient *Client
 )
 
-func handleWS(w http.ResponseWriter, r *http.Request) {
+func handleWSPingPong(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("Upgrade err:", err)
@@ -87,7 +87,7 @@ func main() {
 		port = "8081"
 	}
 
-	http.HandleFunc("/ws", handleWS)
+	http.HandleFunc("/ws_pingpong", handleWSPingPong)
 	log.Printf("Signaling server listening on :%s...", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal(err)
