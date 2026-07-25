@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 
 // シグナリング用メッセージ構造体
 type SignalMessage struct {
-	Type      string                     `json:"type"`
+	Type      string                     `json:"type"` // "hello", "offer", "answer", "candidate"
 	Room      string                     `json:"room"`
 	SenderID  string                     `json:"senderId"` // 自分のID
 	SDP       *webrtc.SessionDescription `json:"sdp,omitempty"`
@@ -25,28 +26,33 @@ type SignalMessage struct {
 }
 
 func main() {
+	// 1. フラグの定義
+	serverURL := flag.String("server", "wss://pppp-9hxy.onrender.com/ws_ppchat", "シグナリングサーバーのURL")
 	roomID := flag.String("room", "room1", "接続用ルームID")
-	role := flag.String("role", "host", "役割: 'host' (Offer作成側) または 'guest' (Answer作成側)")
 	debug := flag.Bool("debug", false, "Output detailed logs.")
 	flag.Parse()
 
 	myID := fmt.Sprintf("peer-%d", time.Now().UnixNano())
-	serverURL := "wss://pppp-9hxy.onrender.com/ws"
 
-	// 1. シグナリングサーバー (WebSocket) に接続
-	log.Printf("[Signaling] サーバーに接続中: %s ...", serverURL)
-	wsConn, _, err := websocket.DefaultDialer.Dial(serverURL, nil)
+	// 2. シグナリングサーバー (WebSocket) に接続
+	log.Printf("[Signaling] サーバーに接続中: %s ...", *serverURL)
+	wsConn, _, err := websocket.DefaultDialer.Dial(*serverURL, nil)
 	if err != nil {
 		log.Fatalf("[Signaling] 接続失敗: %v", err)
 	}
 	defer wsConn.Close()
-	log.Println("[Signaling] サーバー接続完了！")
+	log.Printf("[Signaling] サーバー接続完了！(My ID: %s)", myID)
 
-	// 2. WebRTC PeerConnection の作成
+	// 3. WebRTC Configuration の構築 (STUN の有無を制御)
+	var iceServers []webrtc.ICEServer
+	if *debug {
+		log.Println("[WebRTC] STUN サーバーを使用します")
+	}
+	iceServers = append(iceServers, webrtc.ICEServer{
+		URLs: []string{"stun:stun.l.google.com:19302"},
+	})
 	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{URLs: []string{"stun:stun.l.google.com:19302"}},
-		},
+		ICEServers: iceServers,
 	}
 	peerConnection, err := webrtc.NewPeerConnection(config)
 	if err != nil {
@@ -54,25 +60,14 @@ func main() {
 	}
 	defer peerConnection.Close()
 
-	// 3. ICE Candidate がローカルで発見されたら、シグナリングサーバー経由で送信
+	// ICE Candidate がローカルで発見されたらシグナリングサーバー経由で送信
 	peerConnection.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
 			return
 		}
-		// ローカルアドレスを使わずパブリックなアドレスでP2Pする場合以下をコメントイン
-		// if c.Typ == webrtc.ICECandidateTypeHost {
-		// 	return
-		// }
-
 		if *debug {
 			if cc, err := c.ToICE(); err == nil {
-				log.Printf(
-					"[debug:ICE candidate] Typ: %6s, Protocol: %s, Addr: %s, Port:%d\n",
-					cc.Type().String(),
-					cc.NetworkType().String(),
-					cc.Address(),
-					cc.Port(),
-				)
+				log.Printf("[debug:ICE candidate] Typ: %6s, Addr: %s:%d\n", cc.Type().String(), cc.Address(), cc.Port())
 			}
 		}
 
@@ -85,13 +80,11 @@ func main() {
 		})
 	})
 
-	// X. for debug
 	peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		if state == webrtc.ICEConnectionStateConnected {
-			// 実際に確立されたペア（Selected Candidate Pair）を取得
 			pair, err := peerConnection.SCTP().Transport().ICETransport().GetSelectedCandidatePair()
 			if err == nil && pair != nil && *debug {
-				log.Printf("[debug:ICE established connection] Local: %s:%d (%s) <==> Remote: %s:%d (%s)",
+				log.Printf("[debug:ICE established] Local: %s:%d (%s) <==> Remote: %s:%d (%s)",
 					pair.Local.Address, pair.Local.Port, pair.Local.Typ,
 					pair.Remote.Address, pair.Remote.Port, pair.Remote.Typ,
 				)
@@ -99,54 +92,168 @@ func main() {
 		}
 	})
 
-	// 4. Guest 側: Host から届いた DataChannel をセットアップする準備
+	// 4. DataChannel の準備
+	// メインスレッドに DataChannel を渡すためのチャネル
+	dcReady := make(chan *webrtc.DataChannel, 1)
+
+	setupDataChannel := func(d *webrtc.DataChannel) {
+		d.OnOpen(func() {
+			fmt.Printf("\n==================================================\n")
+			fmt.Printf("[P2P 接続完了!] データチャネル '%s' が開通しました。\n", d.Label())
+			fmt.Printf("メッセージを入力して Enter を押すと P2P 直送されます。\n")
+			fmt.Printf("==================================================\n> ")
+			// メインスレッドに通知
+			dcReady <- d
+		})
+
+		d.OnMessage(func(msg webrtc.DataChannelMessage) {
+			fmt.Printf("\r\033[K[Peer]: %s\n> ", string(msg.Data))
+		})
+	}
+
+	// Guest 側: Host から DataChannel が届いた時のハンドラ
 	peerConnection.OnDataChannel(func(d *webrtc.DataChannel) {
 		setupDataChannel(d)
 	})
 
-	// 5. WebSocket からのメッセージ受信ループをバックグラウンドで開始
-	go handleSignalingIncoming(wsConn, peerConnection, *roomID, *role, myID)
+	// 5. ロール自動決定とシグナリング処理
+	var roleOnce sync.Once
+	var role string
 
-	// 6. 接続シーケンスの開始
-	if *role == "guest" {
-		// Offer を受領するまで 2 秒おきに join を再送するゴルーチン
-		go func() {
-			ticker := time.NewTicker(2 * time.Second)
-			defer ticker.Stop()
+	// 定期的に hello を送って相手を探す
+	helloTicker := time.NewTicker(2 * time.Second)
+	go func() {
+		for range helloTicker.C {
+			sendSignal(wsConn, SignalMessage{Type: "hello", Room: *roomID, SenderID: myID})
+		}
+	}()
 
-			// 1 回目の join を即座に送信
-			sendSignal(wsConn, SignalMessage{
-				Type:     "join",
-				Room:     *roomID,
-				SenderID: myID,
-			})
-			log.Println("[Guest] 入室通知 (join) を送信しました。Host からの Offer を待っています...")
+	// 受信ループ
+	go func() {
+		for {
+			var msg SignalMessage
+			err := wsConn.ReadJSON(&msg)
+			if err != nil {
+				log.Printf("[Signaling] 切断されました: %v", err)
+				return
+			}
 
-			for range ticker.C {
-				// Host から Offer を受信して SetRemoteDescription が完了したら再送を停止
-				if peerConnection.RemoteDescription() != nil {
-					log.Println("[Guest] Host とのハンドシェイクが始まったため join 再送を停止します。")
-					return
+			// 自分自身のメッセージや、別ルームのメッセージは無視
+			if msg.SenderID == myID || msg.Room != *roomID {
+				continue
+			}
+
+			switch msg.Type {
+			case "hello":
+				roleOnce.Do(func() {
+					helloTicker.Stop() // 相手が見つかったので hello の送信を止める
+
+					// ID の大小でロールを決定（タイブレーク）
+					if myID < msg.SenderID {
+						role = "host"
+						log.Printf("[Role] 私が Host (Offer側) になりました (Peer: %s)", msg.SenderID)
+
+						// Host は DataChannel を作成して Offer を送る
+						dataChannel, err := peerConnection.CreateDataChannel("ppchat", nil)
+						if err != nil {
+							log.Printf("DataChannel 作成失敗: %v", err)
+							return
+						}
+						setupDataChannel(dataChannel)
+
+						offer, err := peerConnection.CreateOffer(nil)
+						if err != nil {
+							log.Printf("Offer 作成失敗: %v", err)
+							return
+						}
+						if err := peerConnection.SetLocalDescription(offer); err != nil {
+							log.Printf("SetLocalDescription 失敗: %v", err)
+							return
+						}
+
+						sendSignal(wsConn, SignalMessage{
+							Type:     "offer",
+							Room:     *roomID,
+							SenderID: myID,
+							SDP:      &offer,
+						})
+
+					} else {
+						role = "guest"
+						log.Printf("[Role] 私が Guest (Answer側) になりました (Peer: %s)", msg.SenderID)
+					}
+				})
+
+			case "offer":
+				if role == "guest" && msg.SDP != nil {
+					log.Println("[Guest] Offer を受信しました。Answer を返します...")
+					if err := peerConnection.SetRemoteDescription(*msg.SDP); err != nil {
+						log.Printf("SetRemoteDescription 失敗: %v", err)
+						continue
+					}
+
+					answer, err := peerConnection.CreateAnswer(nil)
+					if err != nil {
+						log.Printf("CreateAnswer 失敗: %v", err)
+						continue
+					}
+					if err := peerConnection.SetLocalDescription(answer); err != nil {
+						log.Printf("SetLocalDescription 失敗: %v", err)
+						continue
+					}
+
+					sendSignal(wsConn, SignalMessage{
+						Type:     "answer",
+						Room:     *roomID,
+						SenderID: myID,
+						SDP:      &answer,
+					})
 				}
 
-				log.Println("[Guest] 応答がないため、入室通知 (join) を再送中...")
-				sendSignal(wsConn, SignalMessage{
-					Type:     "join",
-					Room:     *roomID,
-					SenderID: myID,
-				})
-			}
-		}()
-	} else {
-		// Host 側: 何もせず Guest が「join」してくるのを待機する
-		log.Println("[Host] Guest の入室を待っています... (Guest 側を起動してください)")
-	}
+			case "answer":
+				if role == "host" && msg.SDP != nil {
+					log.Println("[Host] Answer を受信しました。接続を確立します...")
+					if err := peerConnection.SetRemoteDescription(*msg.SDP); err != nil {
+						log.Printf("SetRemoteDescription 失敗: %v", err)
+					}
+				}
 
-	// Ctrl+C が押されるまでメインスレッドを待機
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
-	fmt.Println("\n終了します。")
+			case "candidate":
+				if msg.Candidate != nil {
+					if err := peerConnection.AddICECandidate(*msg.Candidate); err != nil {
+						log.Printf("AddICECandidate 失敗: %v", err)
+					}
+				}
+			}
+		}
+	}()
+
+	// 6. メインスレッドの制御
+	log.Printf("[Waiting] 部屋 '%s' で相手を待っています...", *roomID)
+
+	// Ctrl+C ハンドリングをバックグラウンド化
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		<-sigChan
+		fmt.Println("\n終了します。")
+		os.Exit(0)
+	}()
+
+	// DataChannel が開通するまでここで待機
+	dc := <-dcReady
+
+	// 開通後はメインスレッドで標準入力を監視（Pion のイベントループをブロックしないため）
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		text := strings.TrimSpace(scanner.Text())
+		if text != "" {
+			if err := dc.SendText(text); err != nil {
+				log.Printf("P2P 送信エラー: %v", err)
+			}
+		}
+		fmt.Print("> ")
+	}
 }
 
 // シグナリングサーバーへ JSON メッセージを送信
@@ -154,125 +261,4 @@ func sendSignal(ws *websocket.Conn, msg SignalMessage) {
 	if err := ws.WriteJSON(msg); err != nil {
 		log.Printf("[Signaling] 送信エラー: %v", err)
 	}
-}
-
-// シグナリングサーバーからのメッセージ受信・分岐処理
-func handleSignalingIncoming(ws *websocket.Conn, pc *webrtc.PeerConnection, roomID, role, myID string) {
-	for {
-		var msg SignalMessage
-		err := ws.ReadJSON(&msg)
-		if err != nil {
-			log.Printf("[Signaling] 切断されました: %v", err)
-			return
-		}
-
-		// 「自分が送ったメッセージ」および「別ルームのメッセージ」は無視する
-		if msg.SenderID == myID || msg.Room != roomID {
-			continue
-		}
-
-		switch msg.Type {
-		case "join":
-			// 【Host 側のみ】Guest の入室（join）を確認してから DataChannel と Offer を作成する
-			if role == "host" {
-				log.Println("[Host] Guest が入室しました。Offer を作成します...")
-
-				// DataChannel の作成
-				dataChannel, err := pc.CreateDataChannel("ppchat", nil)
-				if err != nil {
-					log.Printf("DataChannel 作成失敗: %v", err)
-					continue
-				}
-				setupDataChannel(dataChannel)
-
-				// Offer SDP の作成と送信
-				offer, err := pc.CreateOffer(nil)
-				if err != nil {
-					log.Printf("Offer 作成失敗: %v", err)
-					continue
-				}
-				if err := pc.SetLocalDescription(offer); err != nil {
-					log.Printf("SetLocalDescription (Offer) 失敗: %v", err)
-					continue
-				}
-
-				sendSignal(ws, SignalMessage{
-					Type:     "offer",
-					Room:     roomID,
-					SenderID: myID,
-					SDP:      &offer,
-				})
-			}
-
-		case "offer":
-			// 【Guest 側のみ】Host から受け取った Offer に対する Answer を作成して返す
-			if role == "guest" && msg.SDP != nil {
-				log.Println("[Guest] Offer を受信しました。Answer を作成して返します...")
-				if err := pc.SetRemoteDescription(*msg.SDP); err != nil {
-					log.Printf("SetRemoteDescription (Offer) 失敗: %v", err)
-					continue
-				}
-
-				answer, err := pc.CreateAnswer(nil)
-				if err != nil {
-					log.Printf("CreateAnswer 失敗: %v", err)
-					continue
-				}
-				if err := pc.SetLocalDescription(answer); err != nil {
-					log.Printf("SetLocalDescription (Answer) 失敗: %v", err)
-					continue
-				}
-
-				sendSignal(ws, SignalMessage{
-					Type:     "answer",
-					Room:     roomID,
-					SenderID: myID,
-					SDP:      &answer,
-				})
-			}
-
-		case "answer":
-			// 【Host 側のみ】Guest から届いた Answer を登録してハンドシェイク完了
-			if role == "host" && msg.SDP != nil {
-				log.Println("[Host] Answer を受信しました。接続を確立します...")
-				if err := pc.SetRemoteDescription(*msg.SDP); err != nil {
-					log.Printf("SetRemoteDescription (Answer) 失敗: %v", err)
-				}
-			}
-
-		case "candidate":
-			// お互いに届いた ICE Candidate を登録する
-			if msg.Candidate != nil {
-				if err := pc.AddICECandidate(*msg.Candidate); err != nil {
-					log.Printf("AddICECandidate 失敗: %v", err)
-				}
-			}
-		}
-	}
-}
-
-// DataChannel 開通後のメッセージ送受信処理
-func setupDataChannel(d *webrtc.DataChannel) {
-	d.OnOpen(func() {
-		fmt.Printf("\n==================================================\n")
-		fmt.Printf("[P2P 接続完了!] データチャネル '%s' が開通しました。\n", d.Label())
-		fmt.Printf("メッセージを入力して Enter を押すと P2P 直送されます。\n")
-		fmt.Printf("==================================================\n> ")
-
-		// 標準入力を監視して P2P 送信
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			text := strings.TrimSpace(scanner.Text())
-			if text != "" {
-				if err := d.SendText(text); err != nil {
-					log.Printf("P2P 送信エラー: %v", err)
-				}
-				fmt.Print("> ")
-			}
-		}
-	})
-
-	d.OnMessage(func(msg webrtc.DataChannelMessage) {
-		fmt.Printf("\r[相手からの P2P 受信]: %s\n> ", string(msg.Data))
-	})
 }

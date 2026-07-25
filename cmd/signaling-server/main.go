@@ -88,6 +88,8 @@ func main() {
 	}
 
 	http.HandleFunc("/ws_pingpong", handleWSPingPong)
+	http.HandleFunc("/ws_ppchat", NewPPChatSignalingServer().handleWSPPChat)
+
 	log.Printf("Signaling server listening on :%s...", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal(err)
