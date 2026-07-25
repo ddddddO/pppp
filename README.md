@@ -66,13 +66,13 @@ go install github.com/ddddddO/pppp/cmd/ppchat@latest
 - Host
 
 ```console
-ppchat -room test-room1 -role host
+ppchat -room test-room1
 ```
 
 - Guest
 
 ```console
-ppchat -room test-room1 -role guest
+ppchat -room test-room1
 ```
 
 ### Flow

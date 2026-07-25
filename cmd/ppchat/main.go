@@ -118,11 +118,15 @@ func main() {
 	})
 
 	// 5. ロール自動決定とシグナリング処理
+	// 5. ロール自動決定とシグナリング処理
 	var roleOnce sync.Once
 	var role string
 
-	// 定期的に hello を送って相手を探す
 	helloTicker := time.NewTicker(2 * time.Second)
+
+	// Tickerは最初の実行まで2秒待機してしまうため、ループに入る前に即座に1回送信する
+	sendSignal(wsConn, SignalMessage{Type: "hello", Room: *roomID, SenderID: myID})
+
 	go func() {
 		for range helloTicker.C {
 			sendSignal(wsConn, SignalMessage{Type: "hello", Room: *roomID, SenderID: myID})
@@ -131,6 +135,9 @@ func main() {
 
 	// 受信ループ
 	go func() {
+		// RemoteDescription がセットされる前に届いた Candidate を保留するバッファ
+		var pendingCandidates []webrtc.ICECandidateInit
+
 		for {
 			var msg SignalMessage
 			err := wsConn.ReadJSON(&msg)
@@ -147,12 +154,15 @@ func main() {
 			switch msg.Type {
 			case "hello":
 				roleOnce.Do(func() {
-					helloTicker.Stop() // 相手が見つかったので hello の送信を止める
+					helloTicker.Stop() // 相手が見つかったので hello の定期送信を止める
 
 					// ID の大小でロールを決定（タイブレーク）
 					if myID < msg.SenderID {
 						role = "host"
 						log.Printf("[Role] 私が Host (Offer側) になりました (Peer: %s)", msg.SenderID)
+
+						// Hostになった時も、すれ違い防止のために相手へ hello を1回だけ返す
+						sendSignal(wsConn, SignalMessage{Type: "hello", Room: *roomID, SenderID: myID})
 
 						// Host は DataChannel を作成して Offer を送る
 						dataChannel, err := peerConnection.CreateDataChannel("ppchat", nil)
@@ -182,16 +192,33 @@ func main() {
 					} else {
 						role = "guest"
 						log.Printf("[Role] 私が Guest (Answer側) になりました (Peer: %s)", msg.SenderID)
+
+						// Host側に自分の存在を認識させるため、Guestになったら即座にhelloを打ち返す
+						sendSignal(wsConn, SignalMessage{Type: "hello", Room: *roomID, SenderID: myID})
 					}
 				})
 
 			case "offer":
+				// hello を聞き逃して Offer が先に来てしまった場合の救済措置
+				// Offer が来たということは、自分は確実に Guest なのでロールを確定させる
+				roleOnce.Do(func() {
+					helloTicker.Stop()
+					role = "guest"
+					log.Printf("[Role] Offerを受信したため、私が Guest (Answer側) になりました (Peer: %s)", msg.SenderID)
+				})
+
 				if role == "guest" && msg.SDP != nil {
 					log.Println("[Guest] Offer を受信しました。Answer を返します...")
 					if err := peerConnection.SetRemoteDescription(*msg.SDP); err != nil {
 						log.Printf("SetRemoteDescription 失敗: %v", err)
 						continue
 					}
+
+					// Offer (RemoteDescription) の設定が終わったので、保留していた Candidate をまとめて追加
+					for _, c := range pendingCandidates {
+						peerConnection.AddICECandidate(c)
+					}
+					pendingCandidates = nil // バッファをクリア
 
 					answer, err := peerConnection.CreateAnswer(nil)
 					if err != nil {
@@ -217,12 +244,24 @@ func main() {
 					if err := peerConnection.SetRemoteDescription(*msg.SDP); err != nil {
 						log.Printf("SetRemoteDescription 失敗: %v", err)
 					}
+
+					// Answer (RemoteDescription) の設定が終わったので、保留していた Candidate をまとめて追加
+					for _, c := range pendingCandidates {
+						peerConnection.AddICECandidate(c)
+					}
+					pendingCandidates = nil // バッファをクリア
 				}
 
 			case "candidate":
 				if msg.Candidate != nil {
-					if err := peerConnection.AddICECandidate(*msg.Candidate); err != nil {
-						log.Printf("AddICECandidate 失敗: %v", err)
+					// RemoteDescription がまだ無い場合はバッファに保留する
+					if peerConnection.RemoteDescription() == nil {
+						// log.Println("[ICE] SDP 未設定のため Candidate を保留します")
+						pendingCandidates = append(pendingCandidates, *msg.Candidate)
+					} else {
+						if err := peerConnection.AddICECandidate(*msg.Candidate); err != nil {
+							log.Printf("AddICECandidate 失敗: %v", err)
+						}
 					}
 				}
 			}
