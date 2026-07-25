@@ -59,11 +59,15 @@ func main() {
 		if c == nil {
 			return
 		}
+		// ローカルアドレスを使わずパブリックなアドレスでP2Pする場合以下をコメントイン
+		// if c.Typ == webrtc.ICECandidateTypeHost {
+		// 	return
+		// }
 
 		if *debug {
 			if cc, err := c.ToICE(); err == nil {
 				log.Printf(
-					"[debug:Candidate] Typ: %6s, Protocol: %s, Addr: %s, Port:%d\n",
+					"[debug:ICE candidate] Typ: %6s, Protocol: %s, Addr: %s, Port:%d\n",
 					cc.Type().String(),
 					cc.NetworkType().String(),
 					cc.Address(),
@@ -79,6 +83,20 @@ func main() {
 			SenderID:  myID,
 			Candidate: &candidate,
 		})
+	})
+
+	// X. for debug
+	peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		if state == webrtc.ICEConnectionStateConnected {
+			// 実際に確立されたペア（Selected Candidate Pair）を取得
+			pair, err := peerConnection.SCTP().Transport().ICETransport().GetSelectedCandidatePair()
+			if err == nil && pair != nil && *debug {
+				log.Printf("[debug:ICE established connection] Local: %s:%d (%s) <==> Remote: %s:%d (%s)",
+					pair.Local.Address, pair.Local.Port, pair.Local.Typ,
+					pair.Remote.Address, pair.Remote.Port, pair.Remote.Typ,
+				)
+			}
+		}
 	})
 
 	// 4. Guest 側: Host から届いた DataChannel をセットアップする準備
