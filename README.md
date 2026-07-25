@@ -78,22 +78,22 @@ ppchat -room test-room1 -role guest
 ### Flow
 
 ```console
-                     ┌──────────────────────────┐
-                     │     Signaling Server     │
-                     │  (WebSocket / Room Mgmt) │
-                     └──────────┬───┬───────────┘
-                                │   │
-                 ① Signaling    │   │ ① Signaling
-              (Offer/Answer/ICE)│   │ (Offer/Answer/ICE)
-                                ▼   ▼
-┌──────────────────────┐                     ┌──────────────────────┐
-│     ppchat (Host)    │                     │    ppchat (Guest)    │
-│                      │                     │   (Auto-retry join)  │
-└──────────┬───────────┘                     └───────────┬──────────┘
-           │                                             │
-           └─────────────── ② Direct P2P ───────────────┘
-                      (WebRTC DataChannel)
-                     [Encrypted Chat Data]
+               +--------------------------+
+               |     Signaling Server     |
+               |  (WebSocket / Room Mgmt) |
+               +------------+-------------+
+                            |
+             1. Signaling   |   1. Signaling
+         (Offer/Answer/ICE) |   (Offer/Answer/ICE)
+                            v
++------------------+                 +------------------+
+|   ppchat Host    |                 |   ppchat Guest   |
+|                  |                 | (Auto-retry join)|
++--------+---------+                 +--------+---------+
+         |                                    |
+         +=========== 2. Direct P2P ==========+
+                (WebRTC DataChannel)
+               [Encrypted Chat Data]
 ```
 
 ## Note
