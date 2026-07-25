@@ -27,6 +27,7 @@ type SignalMessage struct {
 func main() {
 	roomID := flag.String("room", "room1", "接続用ルームID")
 	role := flag.String("role", "host", "役割: 'host' (Offer作成側) または 'guest' (Answer作成側)")
+	debug := flag.Bool("debug", false, "Output detailed logs.")
 	flag.Parse()
 
 	myID := fmt.Sprintf("peer-%d", time.Now().UnixNano())
@@ -58,6 +59,19 @@ func main() {
 		if c == nil {
 			return
 		}
+
+		if *debug {
+			if cc, err := c.ToICE(); err == nil {
+				log.Printf(
+					"[debug:Candidate] Typ: %6s, Protocol: %s, Addr: %s, Port:%d\n",
+					cc.Type().String(),
+					cc.NetworkType().String(),
+					cc.Address(),
+					cc.Port(),
+				)
+			}
+		}
+
 		candidate := c.ToJSON()
 		sendSignal(wsConn, SignalMessage{
 			Type:      "candidate",

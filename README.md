@@ -105,3 +105,7 @@ ppchat -room test-room1 -role guest
 
 ## Note
 - https://dashboard.render.com/project
+- パケットキャプチャ
+    ```console
+    sudo tcpdump -U -i any -w - | /mnt/c/Program\ Files/Wireshark/Wireshark.exe -k -i -
+    ```
