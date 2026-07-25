@@ -35,8 +35,9 @@ func main() {
 	myID := fmt.Sprintf("peer-%d", time.Now().UnixNano())
 
 	// 2. シグナリングサーバー (WebSocket) に接続
-	log.Printf("[Signaling] サーバーに接続中: %s ...", *serverURL)
-	wsConn, _, err := websocket.DefaultDialer.Dial(*serverURL, nil)
+	connectURL := fmt.Sprintf("%s?room=%s", *serverURL, *roomID)
+	log.Printf("[Signaling] サーバーに接続中: %s ...", connectURL)
+	wsConn, _, err := websocket.DefaultDialer.Dial(connectURL, nil)
 	if err != nil {
 		log.Fatalf("[Signaling] 接続失敗: %v", err)
 	}
