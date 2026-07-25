@@ -78,22 +78,29 @@ ppchat -room test-room1 -role guest
 ### Flow
 
 ```console
-               +--------------------------+
-               |     Signaling Server     |
-               |  (WebSocket / Room Mgmt) |
-               +------------+-------------+
-                            |
-             1. Signaling   |   1. Signaling
-         (Offer/Answer/ICE) |   (Offer/Answer/ICE)
-                            v
-+------------------+                 +------------------+
-|   ppchat Host    |                 |   ppchat Guest   |
-|                  |                 | (Auto-retry join)|
-+--------+---------+                 +--------+---------+
-         |                                    |
-         +=========== 2. Direct P2P ==========+
-                (WebRTC DataChannel)
-               [Encrypted Chat Data]
+                    +--------------------------+
+                    |     Signaling Server     |
+                    |  (WebSocket / Room Mgmt) |
+                    +------------+-------------+
+                                 |
+                  2. Signaling   |   2. Signaling
+              (Offer/Answer/ICE) |   (Offer/Answer/ICE)
+                                 v
++------------------+                    +------------------+
+|   ppchat Host    |                    |   ppchat Guest   |
+|                  |                    | (Auto-retry join)|
++----+--------+----+                    +----+--------+----+
+     |        |                              |          |
+     |        +========= 3. Direct P2P ======+          |
+     |             (WebRTC DataChannel)                 |
+     |            [Encrypted Chat Data]                 |
+     |                                                  |
+     | 1. Query Public IP            1. Query Public IP |
+     v                                                  v
++----------------------------------------------------------+
+|                       STUN Server                        |
+|                (e.g., stun.l.google.com)                 |
++----------------------------------------------------------+
 ```
 
 ## Note
