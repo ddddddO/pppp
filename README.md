@@ -104,8 +104,19 @@ ppchat -room test-room1
 ```
 
 ## Note
-- https://dashboard.render.com/project
+- シグナリングサーバーをホストしてるサービス(https://dashboard.render.com/project)
+    - しばらく音沙汰ないとインスタンスが落ちるから、その状態でリクエスト受けると立ち上げで時間かかるのでレスポンスも遅くなるとのこと
+- [UDPホールパンチングのメモ](https://github.com/ddddddO/work/issues/63)
 - パケットキャプチャ
     ```console
     sudo tcpdump -U -i any -w - | /mnt/c/Program\ Files/Wireshark/Wireshark.exe -k -i -
     ```
+    - PC-aは光回線/PC-bはモバイル回線(ドコモ・テザリング)でそれぞれppchatを起動して、Wiresharkを眺めてた。
+    - すると、googleへのstunプロトコルのリクエスト後に、peer宛てのstunリクエストを何度もしていることがわかった。以下役割とのこと
+        - stunサーバー(google)へのリクエスト: 自分のパブリックIPとポート番号の確認
+        - peerへのリクエスト: 通信先候補のホールパンチングと疎通確認
+            - [RFCはこのあたり](https://tex2e.github.io/rfc-translater/html/rfc8445.html#2-2--Connectivity-Checks)
+- IPv6ではstunサーバーとシグナリングサーバーは不要になるか？
+    - 各々でグローバルなIPを持てるのでstunサーバーは不要
+    - しかし、相手のIPとポートを知る必要があるので、シグナリングサーバーは必要
+    - また、IPv6でNATは必要ないがファイアウォールはあるため、ファイアウォールを突破するためにホールパンチは必要
